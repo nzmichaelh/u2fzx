@@ -1,3 +1,7 @@
+&sercom5 {
+	current-speed = <1000000>;
+};
+
 &flash0 {
 	partitions {
 		compatible = "fixed-partitions";
