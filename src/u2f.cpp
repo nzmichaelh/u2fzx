@@ -81,6 +81,7 @@ struct slice {
 	int get_u8(off_t offset) const;
 
 	explicit operator bool() const { return len > 0; }
+	const char *str() const { return (const char *)p; }
 
 	const u8_t *cbegin() const { return p; }
 	const u8_t *cend() const { return p + len; }
@@ -107,8 +108,17 @@ int slice::get_u8(off_t offset) const
 	return s.p[0];
 }
 
+struct str_slice : public slice {
+	str_slice(const char *msg) {
+		p = (u8_t *)msg;
+		len = strlen(msg);
+	}
+};
+
 template <int N>
 struct fixed_slice : public slice {
+	static const int size = N;
+
 	fixed_slice() {
 		p = buf_;
 		len = N;
@@ -118,7 +128,14 @@ private:
 	u8_t buf_[N];
 };
 
+using u2f_key = fixed_slice<32>;
+using u2f_signature = fixed_slice<64>;
+using u2f_filename = fixed_slice<MAX_FILE_NAME+1>;
+using u2f_handle = fixed_slice<8+1>;
+
 struct sha256 {
+	using digest = fixed_slice<TC_SHA256_DIGEST_SIZE>;
+
 	int init();
 
 	void update(const slice& sl);
@@ -181,6 +198,18 @@ static u16_t u2f_map_err(error err)
 	}
 }
 
+static void u2f_make_filename(const slice& handle, u2f_filename& fname)
+{
+	u8_t *p = fname.p;
+	*p++ = '/';
+	std::copy(handle.cbegin(), handle.cend(), p);
+	p += handle.len - 1;
+	*p++ = '.';
+	*p++ = 'p';
+	*p++ = 'k';
+	*p++ = '\0';
+}
+
 void dump_hex(const char *msg, const u8_t *buf, int len)
 {
 	printk("%s(%d): ", msg, len);
@@ -224,12 +253,14 @@ static void net_buf_add_x962(struct net_buf *resp, const slice& signature)
 	*len += net_buf_add_varint(resp, signature.get_p(32, 32));
 }
 
-static error u2f_write_file(const char *fname, const struct slice& pc)
+static error u2f_write_file(const slice& fname, const slice& pc)
 {
 	struct sfs_file fp;
 	int err;
 
-	err = sfs_open(&fp, fname);
+	SYS_LOG_DBG("fname=%s", fname.str());
+
+	err = sfs_open(&fp, fname.str());
 	if (err != 0) {
 		SYS_LOG_ERR("sfs_open err=%d", err);
 		return ERROR(err);
@@ -250,19 +281,21 @@ static error u2f_write_file(const char *fname, const struct slice& pc)
 	return error::ok;
 }
 
-static int u2f_read_file(const char *fname, slice buf)
+static int u2f_read_file(const slice& fname, slice& buf)
 {
 	struct sfs_dirent entry;
 	struct sfs_file fp;
 	int status;
 
-	status = sfs_stat(fname, &entry);
+	SYS_LOG_DBG("fname=%s", fname.str());
+
+	status = sfs_stat(fname.str(), &entry);
 	if (status != 0) {
 		SYS_LOG_ERR("sfs_stat");
 		return status;
 	}
 
-	status = sfs_open(&fp, fname);
+	status = sfs_open(&fp, (char *)fname.p);
 	if (status != 0) {
 		SYS_LOG_ERR("sfs_open");
 		return status;
@@ -283,8 +316,6 @@ static error u2f_write_private(const slice& priv, slice& handle)
 		int status;
 		size_t olen;
 
-		handle.p[0] = '/';
-
 		/* Create a handle */
 		if (default_CSPRNG(key, sizeof(key)) != TC_CRYPTO_SUCCESS) {
 			SYS_LOG_ERR("default_CSPRNG");
@@ -292,21 +323,23 @@ static error u2f_write_private(const slice& priv, slice& handle)
 		}
 
 		/* Make the handle printable */
-		status = mbedtls_base64_encode(handle.p + 1, 8 + 1, &olen, key,
+		status = mbedtls_base64_encode(handle.p, handle.len, &olen, key,
 					    sizeof(key));
 		if (status != 0) {
 			SYS_LOG_ERR("base64_encode err=%d", status);
 			return error::nomem;
 		}
 
-		strcat((char *)handle.p, ".pk");
+		u2f_filename fname;
 
-		if (sfs_stat((char *)handle.p, &entry) == 0) {
+		u2f_make_filename(handle, fname);
+
+		if (sfs_stat((char *)fname.p, &entry) == 0) {
 			/* Handle already exists, try again. */
 			continue;
 		}
 
-		err = u2f_write_file((char *)handle.p, priv);
+		err = u2f_write_file(fname, priv);
 		if (err) {
 			return err;
 		}
@@ -324,7 +357,6 @@ static error u2f_authenticate(int p1, const struct slice& pc, int le,
 	auto app = pc.get_p(32, 32);
 	int l = pc.get_u8(64);
 	auto handle = pc.get_p(65, l);
-	char fname[MAX_FILE_NAME + 1];
 	int err;
 
 	SYS_LOG_DBG("chal=%p app=%p l=%d handle=%p", chal.p, app.p, l, handle.p);
@@ -337,15 +369,16 @@ static error u2f_authenticate(int p1, const struct slice& pc, int le,
 	dump_hex("app", app);
 	dump_hex("handle", handle);
 
-	if (l != MAX_FILE_NAME) {
+	if (l != u2f_handle::size) {
 		return error::inval;
 	}
 
-	std::copy(handle.cbegin(), handle.cend(), fname);
-	fname[sizeof(fname) - 1] = '\0';
+	u2f_filename fname;
+
+	u2f_make_filename(handle, fname);
 
 	/* Fetch the private key */
-	fixed_slice<32> priv;
+	u2f_key priv;
 
 	err = u2f_read_file(fname, priv);
 	if (err != (int)priv.len) {
@@ -373,12 +406,12 @@ static error u2f_authenticate(int p1, const struct slice& pc, int le,
 	sha.update<u32_t>(1);
 	sha.update(chal);
 
-	fixed_slice<TC_SHA256_DIGEST_SIZE> digest;
+	sha256::digest digest;
 
 	sha.sum(digest);
 
 	/* Generate the signature */
-	fixed_slice<64> signature;
+	u2f_signature signature;
 
 	if (uECC_sign(priv.p, digest.p, digest.len, signature.p,
 		      uECC_secp256r1()) != TC_CRYPTO_SUCCESS) {
@@ -396,11 +429,9 @@ static error u2f_register(int p1, const struct slice& pc, int le,
 {
 	auto chal = pc.get_p(0, 32);
 	auto app = pc.get_p(32, 32);
-	fixed_slice<32> priv;
 	error err;
-	int read;
 
-	if (pc.len != 64) {
+	if (!chal || !app) {
 		SYS_LOG_ERR("lc=%d", pc.len);
 		return error::inval;
 	}
@@ -415,6 +446,8 @@ static error u2f_register(int p1, const struct slice& pc, int le,
 		.len = 64,
 	};
 
+	u2f_key priv;
+
 	/* Generate a new public/private key pair */
 	if (uECC_make_key(pub.p, priv.p, uECC_secp256r1()) !=
 	    TC_CRYPTO_SUCCESS) {
@@ -422,7 +455,7 @@ static error u2f_register(int p1, const struct slice& pc, int le,
 		return error::nomem;
 	}
 
-	fixed_slice<MAX_FILE_NAME + 1> handle;
+	u2f_handle handle;
 
 	err = u2f_write_private(priv, handle);
 	if (err) {
@@ -430,15 +463,15 @@ static error u2f_register(int p1, const struct slice& pc, int le,
 		return err;
 	}
 
-	net_buf_add_u8(resp, handle.len - 1);
-	net_buf_add_mem(resp, handle.p, handle.len - 1);
+	net_buf_add_u8(resp, handle.len);
+	net_buf_add_mem(resp, handle.p, handle.len);
 
 	/* Add the attestation certificate */
 	slice tail = {
 		.p = net_buf_tail(resp),
 		.len = net_buf_tailroom(resp),
 	};
-	read = u2f_read_file(U2F_CERTIFICATE_NAME, tail);
+	auto read = u2f_read_file(str_slice(U2F_CERTIFICATE_NAME), tail);
 	if (read < 0) {
 		return ERROR(read);
 	}
@@ -456,33 +489,30 @@ static error u2f_register(int p1, const struct slice& pc, int le,
 		return error::nomem;
 	}
 
-	slice foo = {
-		.p = handle.p,
-		.len = handle.len - 1,
-	};
-
 	sha.update<u8_t>(0);
 	sha.update(app);
 	sha.update(chal);
-	sha.update(foo);
+	sha.update(handle);
 	sha.update<u8_t>(U2F_EC_FMT_UNCOMPRESSED);
 	sha.update(pub);
 
-	fixed_slice<TC_SHA256_DIGEST_SIZE> digest;
+	sha256::digest digest;
 
 	sha.sum(digest);
 
 	/* Generate the signature */
-	fixed_slice<64> signature;
-	fixed_slice<32> key;
+	u2f_key key;
 
-	read = u2f_read_file(U2F_PRIVATE_KEY_NAME, key);
+	read = u2f_read_file(str_slice(U2F_PRIVATE_KEY_NAME), key);
 	if (read < 0) {
 		return ERROR(read);
 	}
 	if (read != (int)key.len) {
 		return error::inval;
 	}
+
+	u2f_signature signature;
+
 	if (uECC_sign(key.p, digest.p, digest.len, signature.p,
 		      uECC_secp256r1()) != TC_CRYPTO_SUCCESS) {
 		SYS_LOG_ERR("uECC_sign");
@@ -501,12 +531,12 @@ static error u2f_version(int p1, const slice& pc, int le, struct net_buf *resp)
 	return error::ok;
 }
 
-static error u2f_write_once(const char *fname, const struct slice& pc)
+static error u2f_write_once(const slice& fname, const struct slice& pc)
 {
 	struct sfs_dirent entry;
 
-	if (sfs_stat(fname, &entry) == 0) {
-		SYS_LOG_ERR("%s exists", fname);
+	if (sfs_stat(fname.str(), &entry) == 0) {
+		SYS_LOG_ERR("%s exists", fname.str());
 		return error::exist;
 	}
 
@@ -519,12 +549,12 @@ static error u2f_set_private_key(const struct slice& pc)
 		return error::inval;
 	}
 
-	return u2f_write_once(U2F_PRIVATE_KEY_NAME, pc);
+	return u2f_write_once(str_slice(U2F_PRIVATE_KEY_NAME), pc);
 }
 
 static error u2f_set_certificate(const struct slice& pc)
 {
-	return u2f_write_once(U2F_CERTIFICATE_NAME, pc);
+	return u2f_write_once(str_slice(U2F_CERTIFICATE_NAME), pc);
 }
 
 static error u2f_erase(void)
@@ -628,6 +658,8 @@ error u2f_dispatch(struct net_buf *req, struct net_buf *resp)
 		err = error::noent;
 		break;
 	}
+
+	SYS_LOG_ERR("err=%d", err.code);
 
 	net_buf_add_be16(resp, u2f_map_err(err));
 
