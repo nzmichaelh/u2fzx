@@ -1,0 +1,12 @@
+&flash0 {
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		sfs_partition: partition@3c000 {
+			label = "sfs";
+			reg = <0x0003c000 0x00004000>;
+		};
+	};
+};
