@@ -21,6 +21,7 @@
 #include <tinycrypt/sha256.h>
 
 #include "sfs.h"
+#include "stdish.h"
 
 #define U2F_EC_FMT_UNCOMPRESSED 0x04
 
@@ -43,6 +44,7 @@
 #define U2F_VERSION 0x03
 #define U2F_VENDOR_FIRST 0xc0
 #define U2F_VENDOR_LAST 0xff
+#define U2F_VENDOR_JUJU 0xc9
 
 #define U2F_ERASE 0xc1
 #define U2F_SET_CERTIFICATE 0xc2
@@ -70,9 +72,94 @@
 #define U2F_CERTIFICATE_NAME "/attest.der"
 
 struct slice {
-	const u8_t *p;
-	int len;
+	u8_t *p;
+	size_t len;
+
+	slice get_p(off_t offset, size_t len) const;
+	int get_u8(off_t offset) const;
+
+	explicit operator bool() const { return len > 0; }
+
+	const u8_t *cbegin() const { return p; }
+	const u8_t *cend() const { return p + len; }
 };
+
+slice slice::get_p(off_t offset, size_t len) const
+{
+	if (offset < 0 || len < 0) {
+		return { nullptr };
+	}
+	if (offset + len > this->len) {
+		return { nullptr };
+	}
+	return { .p = p + offset, .len = len };
+}
+
+int slice::get_u8(off_t offset) const
+{
+	auto s = get_p(offset, 1);
+
+	if (!s) {
+		return -EINVAL;
+	}
+	return s.p[0];
+}
+
+template <int N>
+struct fixed_slice : public slice {
+	fixed_slice() {
+		p = buf_;
+		len = N;
+	}
+
+private:
+	u8_t buf_[N];
+};
+
+struct sha256 {
+	int init();
+
+	void update(const slice& sl);
+	template<int N>
+	void update(const fixed_slice<N>& sl) {
+		update(static_cast<const slice&>(sl));
+	}
+	template<typename T>
+	void update(T ch);
+
+	void sum(slice &sl);
+
+private:
+	struct tc_sha256_state_struct sha_;
+};
+
+int sha256::init()
+{
+	return tc_sha256_init(&sha_);
+}
+
+void sha256::update(const slice& sl)
+{
+	tc_sha256_update(&sha_, sl.p, sl.len);
+}
+
+template<typename T>
+void sha256::update(T ch)
+{
+	u8_t buf[sizeof(ch)];
+
+	for (int i = sizeof(ch) - 1; i >= 0; i--) {
+		buf[i] = static_cast<u8_t>(ch);
+		ch >>= 8;
+	}
+
+	tc_sha256_update(&sha_, buf, sizeof(buf));
+}
+
+void sha256::sum(slice &sl)
+{
+	tc_sha256_final(sl.p, &sha_);
+}
 
 static u16_t u2f_map_err(int err)
 {
@@ -93,27 +180,6 @@ static u16_t u2f_map_err(int err)
 	}
 }
 
-const u8_t *get_p(struct slice *s, int offset, int len)
-{
-	if (offset < 0 || len < 0) {
-		return NULL;
-	}
-	if (offset + len > s->len) {
-		return NULL;
-	}
-	return s->p + offset;
-}
-
-int get_u8(struct slice *s, int offset)
-{
-	const u8_t *p = get_p(s, offset, 1);
-
-	if (p == NULL) {
-		return -EINVAL;
-	}
-	return *p;
-}
-
 void dump_hex(const char *msg, const u8_t *buf, int len)
 {
 	printk("%s(%d): ", msg, len);
@@ -123,24 +189,29 @@ void dump_hex(const char *msg, const u8_t *buf, int len)
 	printk("\n");
 }
 
-static int net_buf_add_varint(struct net_buf *resp, const u8_t *buf, int len)
+void dump_hex(const char *msg, const slice& s)
+{
+	dump_hex(msg, s.p, s.len);
+}
+
+static int net_buf_add_varint(struct net_buf *resp, const slice& sl)
 {
 	net_buf_add_u8(resp, 0x02);
 
-	if ((buf[0] & 0x80) != 0) {
-		net_buf_add_le16(resp, len + 1);
-		net_buf_add_mem(resp, buf, len);
+	if ((sl.get_u8(0) & 0x80) != 0) {
+		net_buf_add_le16(resp, sl.len + 1);
+		net_buf_add_mem(resp, sl.p, sl.len);
 
-		return len + 1 + 2;
+		return sl.len + 1 + 2;
 	}
 
-	net_buf_add_u8(resp, len);
-	net_buf_add_mem(resp, buf, len);
+	net_buf_add_u8(resp, sl.len);
+	net_buf_add_mem(resp, sl.p, sl.len);
 
-	return len + 1 + 1;
+	return sl.len + 1 + 1;
 }
 
-static void net_buf_add_x962(struct net_buf *resp, const u8_t *signature)
+static void net_buf_add_x962(struct net_buf *resp, const slice& signature)
 {
 	/* Encode the signature in X9.62 format */
 	net_buf_add_u8(resp, 0x30);
@@ -148,11 +219,11 @@ static void net_buf_add_x962(struct net_buf *resp, const u8_t *signature)
 
 	*len = 0;
 
-	*len += net_buf_add_varint(resp, &signature[0], 32);
-	*len += net_buf_add_varint(resp, &signature[32], 32);
+	*len += net_buf_add_varint(resp, signature.get_p(0, 32));
+	*len += net_buf_add_varint(resp, signature.get_p(32, 32));
 }
 
-static int u2f_write_file(const char *fname, struct slice *pc)
+static int u2f_write_file(const char *fname, const struct slice& pc)
 {
 	struct sfs_file fp;
 	int err;
@@ -163,8 +234,8 @@ static int u2f_write_file(const char *fname, struct slice *pc)
 		return err;
 	}
 
-	err = sfs_write(&fp, pc->p, pc->len);
-	if (err != pc->len) {
+	err = sfs_write(&fp, pc.p, pc.len);
+	if (err != pc.len) {
 		SYS_LOG_ERR("sfs_write err=%d", err);
 		return err;
 	}
@@ -178,7 +249,7 @@ static int u2f_write_file(const char *fname, struct slice *pc)
 	return 0;
 }
 
-static int u2f_read_file(const char *fname, u8_t *buf, int len)
+static int u2f_read_file(const char *fname, slice buf)
 {
 	struct sfs_dirent entry;
 	struct sfs_file fp;
@@ -196,25 +267,21 @@ static int u2f_read_file(const char *fname, u8_t *buf, int len)
 		return err;
 	}
 
-	err = sfs_read(&fp, buf, len);
+	err = sfs_read(&fp, buf.p, buf.len);
 	sfs_close(&fp);
 
 	return err;
 }
 
-static int u2f_write_private(const u8_t *priv, char *handle)
+static int u2f_write_private(const slice& priv, slice& handle)
 {
-	struct slice s = {
-		.p = priv, .len = 32,
-	};
-
 	for (;;) {
 		u8_t key[6];
 		struct sfs_dirent entry;
 		int err;
 		size_t olen;
 
-		handle[0] = '/';
+		handle.p[0] = '/';
 
 		/* Create a handle */
 		if (default_CSPRNG(key, sizeof(key)) != TC_CRYPTO_SUCCESS) {
@@ -223,21 +290,21 @@ static int u2f_write_private(const u8_t *priv, char *handle)
 		}
 
 		/* Make the handle printable */
-		err = mbedtls_base64_encode((u8_t*)handle + 1, 8 + 1, &olen, key,
+		err = mbedtls_base64_encode(handle.p + 1, 8 + 1, &olen, key,
 					    sizeof(key));
 		if (err != 0) {
 			SYS_LOG_ERR("base64_encode err=%d", err);
 			return -ENOMEM;
 		}
 
-		strcat(handle, ".pk");
+		strcat((char *)handle.p, ".pk");
 
-		if (sfs_stat(handle, &entry) == 0) {
+		if (sfs_stat((char *)handle.p, &entry) == 0) {
 			/* Handle already exists, try again. */
 			continue;
 		}
 
-		err = u2f_write_file(handle, &s);
+		err = u2f_write_file((char *)handle.p, priv);
 		if (err != 0) {
 			SYS_LOG_ERR("err=%d", err);
 			return err;
@@ -249,41 +316,42 @@ static int u2f_write_private(const u8_t *priv, char *handle)
 		;
 }
 
-static int u2f_authenticate(int p1, struct slice *pc, int le,
+static int u2f_authenticate(int p1, const struct slice& pc, int le,
 			    struct net_buf *resp)
 {
-	const u8_t *chal = get_p(pc, 0, 32);
-	const u8_t *app = get_p(pc, 32, 32);
-	int l = get_u8(pc, 64);
-	const u8_t *handle = get_p(pc, 65, l);
+	auto chal = pc.get_p(0, 32);
+	auto app = pc.get_p(32, 32);
+	int l = pc.get_u8(64);
+	auto handle = pc.get_p(65, l);
 	char fname[MAX_FILE_NAME + 1];
 	int err;
 
-	SYS_LOG_DBG("chal=%p app=%p l=%d handle=%p", chal, app, l, handle);
+	SYS_LOG_DBG("chal=%p app=%p l=%d handle=%p", chal.p, app.p, l, handle.p);
 
-	if (chal == NULL || app == NULL || l < 0 || handle == NULL) {
+	if (!chal || !app || l < 0 || !handle) {
 		return -EINVAL;
 	}
 
-	dump_hex("chal", chal, 32);
-	dump_hex("app", app, 32);
-	dump_hex("handle", handle, l);
+	dump_hex("chal", chal);
+	dump_hex("app", app);
+	dump_hex("handle", handle);
 
 	if (l != MAX_FILE_NAME) {
 		return -EINVAL;
 	}
-	memcpy(fname, handle, l);
+
+	std::copy(handle.cbegin(), handle.cend(), fname);
 	fname[sizeof(fname) - 1] = '\0';
 
 	/* Fetch the private key */
-	u8_t priv[32];
+	fixed_slice<32> priv;
 
-	err = u2f_read_file(fname, priv, sizeof(priv));
-	if (err != sizeof(priv)) {
+	err = u2f_read_file(fname, priv);
+	if (err != priv.len) {
 		return -EINVAL;
 	}
 
-	dump_hex("private", priv, sizeof(priv));
+	dump_hex("private", priv);
 
 	/* Add user presence */
 	net_buf_add_u8(resp, 1);
@@ -292,33 +360,26 @@ static int u2f_authenticate(int p1, struct slice *pc, int le,
 	net_buf_add_be32(resp, 0x01010101);
 
 	/* Generate the digest */
-	struct tc_sha256_state_struct sha;
+	sha256 sha;
 
-	if (tc_sha256_init(&sha) != TC_CRYPTO_SUCCESS) {
+	if (sha.init() != TC_CRYPTO_SUCCESS) {
 		SYS_LOG_ERR("tc_sha256_init");
 		return -ENOMEM;
 	}
 
-	tc_sha256_update(&sha, app, 32);
+	sha.update(app);
+	sha.update<u8_t>(1);
+	sha.update<u32_t>(1);
+	sha.update(chal);
 
-	u8_t ch = 1;
+	fixed_slice<TC_SHA256_DIGEST_SIZE> digest;
 
-	tc_sha256_update(&sha, &ch, sizeof(ch));
-
-	u8_t w[sizeof(u32_t)];
-	sys_put_be32(1, w);
-
-	tc_sha256_update(&sha, w, sizeof(w));
-	tc_sha256_update(&sha, chal, 32);
-
-	u8_t digest[TC_SHA256_DIGEST_SIZE];
-
-	tc_sha256_final(digest, &sha);
+	sha.sum(digest);
 
 	/* Generate the signature */
-	u8_t signature[64];
+	fixed_slice<64> signature;
 
-	if (uECC_sign(priv, digest, sizeof(digest), signature,
+	if (uECC_sign(priv.p, digest.p, digest.len, signature.p,
 		      uECC_secp256r1()) != TC_CRYPTO_SUCCESS) {
 		SYS_LOG_ERR("uECC_sign");
 		return -ENOMEM;
@@ -329,17 +390,16 @@ static int u2f_authenticate(int p1, struct slice *pc, int le,
 	return 0;
 }
 
-static int u2f_register(int p1, struct slice *pc, int le,
+static int u2f_register(int p1, const struct slice& pc, int le,
 			struct net_buf *resp)
 {
-	const u8_t *chal = get_p(pc, 0, 32);
-	const u8_t *app = get_p(pc, 32, 32);
-	u8_t priv[32];
-	u8_t ch;
+	auto chal = pc.get_p(0, 32);
+	auto app = pc.get_p(32, 32);
+	fixed_slice<32> priv;
 	int err;
 
-	if (pc->len != 64) {
-		SYS_LOG_ERR("lc=%d", pc->len);
+	if (pc.len != 64) {
+		SYS_LOG_ERR("lc=%d", pc.len);
 		return -EINVAL;
 	}
 
@@ -348,16 +408,19 @@ static int u2f_register(int p1, struct slice *pc, int le,
 
 	/* Reserve space for the public key */
 	net_buf_add_u8(resp, U2F_EC_FMT_UNCOMPRESSED);
-	u8_t *pub = (u8_t *)net_buf_add(resp, 64);
+	slice pub = {
+		.p = (u8_t *)net_buf_add(resp, 64),
+		.len = 64,
+	};
 
 	/* Generate a new public/private key pair */
-	if (uECC_make_key(pub, priv, uECC_secp256r1()) !=
+	if (uECC_make_key(pub.p, priv.p, uECC_secp256r1()) !=
 	    TC_CRYPTO_SUCCESS) {
 		SYS_LOG_ERR("uECC_make_key");
 		return -ENOMEM;
 	}
 
-	char handle[MAX_FILE_NAME + 1];
+	fixed_slice<MAX_FILE_NAME + 1> handle;
 
 	err = u2f_write_private(priv, handle);
 	if (err != 0) {
@@ -365,12 +428,15 @@ static int u2f_register(int p1, struct slice *pc, int le,
 		return err;
 	}
 
-	net_buf_add_u8(resp, sizeof(handle) - 1);
-	net_buf_add_mem(resp, handle, sizeof(handle) - 1);
+	net_buf_add_u8(resp, handle.len - 1);
+	net_buf_add_mem(resp, handle.p, handle.len - 1);
 
 	/* Add the attestation certificate */
-	err = u2f_read_file(U2F_CERTIFICATE_NAME, net_buf_tail(resp),
-			    net_buf_tailroom(resp));
+	slice tail = {
+		.p = net_buf_tail(resp),
+		.len = net_buf_tailroom(resp),
+	};
+	err = u2f_read_file(U2F_CERTIFICATE_NAME, tail);
 	if (err < 0) {
 		return err;
 	}
@@ -380,38 +446,36 @@ static int u2f_register(int p1, struct slice *pc, int le,
 	net_buf_add(resp, err);
 
 	/* Generate the digest */
-	struct tc_sha256_state_struct sha;
+	sha256 sha;
 
-	if (tc_sha256_init(&sha) != TC_CRYPTO_SUCCESS) {
+	if (sha.init() != TC_CRYPTO_SUCCESS) {
 		SYS_LOG_ERR("tc_sha256_init");
 		return -ENOMEM;
 	}
 
-	ch = 0;
-	tc_sha256_update(&sha, &ch, sizeof(ch));
-	tc_sha256_update(&sha, app, 32);
-	tc_sha256_update(&sha, chal, 32);
-	tc_sha256_update(&sha, (u8_t*)handle, sizeof(handle) - 1);
-	ch = U2F_EC_FMT_UNCOMPRESSED;
-	tc_sha256_update(&sha, &ch, sizeof(ch));
-	tc_sha256_update(&sha, pub, 64);
+	sha.update<u8_t>(0);
+	sha.update(app);
+	sha.update(chal);
+	sha.update(handle);
+	sha.update<u8_t>(U2F_EC_FMT_UNCOMPRESSED);
+	sha.update(pub);
 
-	u8_t digest[TC_SHA256_DIGEST_SIZE];
+	fixed_slice<TC_SHA256_DIGEST_SIZE> digest;
 
-	tc_sha256_final(digest, &sha);
+	sha.sum(digest);
 
 	/* Generate the signature */
-	u8_t signature[64];
-	u8_t key[32];
+	fixed_slice<64> signature;
+	fixed_slice<32> key;
 
-	err = u2f_read_file(U2F_PRIVATE_KEY_NAME, key, sizeof(key));
+	err = u2f_read_file(U2F_PRIVATE_KEY_NAME, key);
 	if (err < 0) {
 		return err;
 	}
-	if (err != sizeof(key)) {
+	if (err != key.len) {
 		return -EINVAL;
 	}
-	if (uECC_sign(key, digest, sizeof(digest), signature,
+	if (uECC_sign(key.p, digest.p, digest.len, signature.p,
 		      uECC_secp256r1()) != TC_CRYPTO_SUCCESS) {
 		SYS_LOG_ERR("uECC_sign");
 		return -ENOMEM;
@@ -422,14 +486,14 @@ static int u2f_register(int p1, struct slice *pc, int le,
 	return 0;
 }
 
-static int u2f_version(int p1, struct slice *pc, int le, struct net_buf *resp)
+static int u2f_version(int p1, const slice& pc, int le, struct net_buf *resp)
 {
 	net_buf_add_mem(resp, "U2F_V2", 6);
 
 	return 0;
 }
 
-static int u2f_write_once(const char *fname, struct slice *pc)
+static int u2f_write_once(const char *fname, const struct slice& pc)
 {
 	struct sfs_dirent entry;
 
@@ -441,16 +505,16 @@ static int u2f_write_once(const char *fname, struct slice *pc)
 	return u2f_write_file(fname, pc);
 }
 
-static int u2f_set_private_key(struct slice *pc)
+static int u2f_set_private_key(const struct slice& pc)
 {
-	if (pc->len != 32) {
+	if (pc.len != 32) {
 		return -EINVAL;
 	}
 
 	return u2f_write_once(U2F_PRIVATE_KEY_NAME, pc);
 }
 
-static int u2f_set_certificate(struct slice *pc)
+static int u2f_set_certificate(const struct slice& pc)
 {
 	return u2f_write_once(U2F_CERTIFICATE_NAME, pc);
 }
@@ -488,6 +552,20 @@ static int u2f_erase(void)
 err:
 	sfs_closedir(&dir);
 	return err;
+}
+
+static int u2f_vendor(u8_t p1, u8_t p2, struct slice& pc)
+{
+	switch (p1) {
+	case U2F_SET_PRIVATE_KEY:
+		return u2f_set_private_key(pc);
+	case U2F_SET_CERTIFICATE:
+		return u2f_set_certificate(pc);
+	case U2F_ERASE:
+		return u2f_erase();
+	default:
+		return -ENOENT;
+	}
 }
 
 int u2f_dispatch(struct net_buf *req, struct net_buf *resp)
@@ -532,22 +610,16 @@ int u2f_dispatch(struct net_buf *req, struct net_buf *resp)
 		    le);
 	switch (ins) {
 	case U2F_REGISTER:
-		err = u2f_register(p1, &pc, le, resp);
+		err = u2f_register(p1, pc, le, resp);
 		break;
 	case U2F_AUTHENTICATE:
-		err = u2f_authenticate(p1, &pc, le, resp);
+		err = u2f_authenticate(p1, pc, le, resp);
 		break;
 	case U2F_VERSION:
-		err = u2f_version(p1, &pc, le, resp);
+		err = u2f_version(p1, pc, le, resp);
 		break;
-	case U2F_SET_PRIVATE_KEY:
-		err = u2f_set_private_key(&pc);
-		break;
-	case U2F_SET_CERTIFICATE:
-		err = u2f_set_certificate(&pc);
-		break;
-	case U2F_ERASE:
-		err = u2f_erase();
+	case U2F_VENDOR_JUJU:
+		err = u2f_vendor(p1, p2, pc);
 		break;
 	default:
 		SYS_LOG_ERR("ins=%d not supported", ins);
