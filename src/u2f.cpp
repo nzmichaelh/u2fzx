@@ -144,7 +144,7 @@ static void net_buf_add_x962(struct net_buf *resp, const u8_t *signature)
 {
 	/* Encode the signature in X9.62 format */
 	net_buf_add_u8(resp, 0x30);
-	u8_t *len = net_buf_add(resp, 1);
+	u8_t *len = (u8_t *)net_buf_add(resp, 1);
 
 	*len = 0;
 
@@ -202,10 +202,10 @@ static int u2f_read_file(const char *fname, u8_t *buf, int len)
 	return err;
 }
 
-static int u2f_write_private(const u8_t *private, u8_t *handle)
+static int u2f_write_private(const u8_t *priv, char *handle)
 {
 	struct slice s = {
-		.p = private, .len = 32,
+		.p = priv, .len = 32,
 	};
 
 	for (;;) {
@@ -223,7 +223,7 @@ static int u2f_write_private(const u8_t *private, u8_t *handle)
 		}
 
 		/* Make the handle printable */
-		err = mbedtls_base64_encode(handle + 1, 8 + 1, &olen, key,
+		err = mbedtls_base64_encode((u8_t*)handle + 1, 8 + 1, &olen, key,
 					    sizeof(key));
 		if (err != 0) {
 			SYS_LOG_ERR("base64_encode err=%d", err);
@@ -256,7 +256,7 @@ static int u2f_authenticate(int p1, struct slice *pc, int le,
 	const u8_t *app = get_p(pc, 32, 32);
 	int l = get_u8(pc, 64);
 	const u8_t *handle = get_p(pc, 65, l);
-	u8_t fname[MAX_FILE_NAME + 1];
+	char fname[MAX_FILE_NAME + 1];
 	int err;
 
 	SYS_LOG_DBG("chal=%p app=%p l=%d handle=%p", chal, app, l, handle);
@@ -276,14 +276,14 @@ static int u2f_authenticate(int p1, struct slice *pc, int le,
 	fname[sizeof(fname) - 1] = '\0';
 
 	/* Fetch the private key */
-	u8_t private[32];
+	u8_t priv[32];
 
-	err = u2f_read_file(fname, private, sizeof(private));
-	if (err != sizeof(private)) {
+	err = u2f_read_file(fname, priv, sizeof(priv));
+	if (err != sizeof(priv)) {
 		return -EINVAL;
 	}
 
-	dump_hex("private", private, sizeof(private));
+	dump_hex("private", priv, sizeof(priv));
 
 	/* Add user presence */
 	net_buf_add_u8(resp, 1);
@@ -318,7 +318,7 @@ static int u2f_authenticate(int p1, struct slice *pc, int le,
 	/* Generate the signature */
 	u8_t signature[64];
 
-	if (uECC_sign(private, digest, sizeof(digest), signature,
+	if (uECC_sign(priv, digest, sizeof(digest), signature,
 		      uECC_secp256r1()) != TC_CRYPTO_SUCCESS) {
 		SYS_LOG_ERR("uECC_sign");
 		return -ENOMEM;
@@ -334,7 +334,7 @@ static int u2f_register(int p1, struct slice *pc, int le,
 {
 	const u8_t *chal = get_p(pc, 0, 32);
 	const u8_t *app = get_p(pc, 32, 32);
-	u8_t private[32];
+	u8_t priv[32];
 	u8_t ch;
 	int err;
 
@@ -348,18 +348,18 @@ static int u2f_register(int p1, struct slice *pc, int le,
 
 	/* Reserve space for the public key */
 	net_buf_add_u8(resp, U2F_EC_FMT_UNCOMPRESSED);
-	u8_t *public = net_buf_add(resp, 64);
+	u8_t *pub = (u8_t *)net_buf_add(resp, 64);
 
 	/* Generate a new public/private key pair */
-	if (uECC_make_key(public, private, uECC_secp256r1()) !=
+	if (uECC_make_key(pub, priv, uECC_secp256r1()) !=
 	    TC_CRYPTO_SUCCESS) {
 		SYS_LOG_ERR("uECC_make_key");
 		return -ENOMEM;
 	}
 
-	u8_t handle[MAX_FILE_NAME + 1];
+	char handle[MAX_FILE_NAME + 1];
 
-	err = u2f_write_private(private, handle);
+	err = u2f_write_private(priv, handle);
 	if (err != 0) {
 		SYS_LOG_ERR("write_private");
 		return err;
@@ -391,10 +391,10 @@ static int u2f_register(int p1, struct slice *pc, int le,
 	tc_sha256_update(&sha, &ch, sizeof(ch));
 	tc_sha256_update(&sha, app, 32);
 	tc_sha256_update(&sha, chal, 32);
-	tc_sha256_update(&sha, handle, sizeof(handle) - 1);
+	tc_sha256_update(&sha, (u8_t*)handle, sizeof(handle) - 1);
 	ch = U2F_EC_FMT_UNCOMPRESSED;
 	tc_sha256_update(&sha, &ch, sizeof(ch));
-	tc_sha256_update(&sha, public, 64);
+	tc_sha256_update(&sha, pub, 64);
 
 	u8_t digest[TC_SHA256_DIGEST_SIZE];
 

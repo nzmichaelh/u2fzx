@@ -41,6 +41,8 @@
 #define U2FHID_CONT_PAYLOAD_SIZE (U2FHID_PACKET_SIZE - 5)
 #define U2FHID_MAX_PAYLOAD_SIZE (7609)
 
+extern struct net_buf_pool hid_msg_pool;
+
 void dump_hex(const char *msg, const u8_t *buf, int len);
 int u2f_dispatch(struct net_buf *req, struct net_buf *resp);
 
@@ -87,8 +89,6 @@ struct hid_data {
 };
 
 static struct hid_data data;
-
-NET_BUF_POOL_DEFINE(hid_msg_pool, 4, 700, 0, NULL);
 
 /* Some HID sample Report Descriptor */
 static const u8_t hid_report_desc[] = {
@@ -138,7 +138,8 @@ static void hid_tx(struct k_work *work)
 				U2FHID_PACKET_SIZE, &wrote);
 	} else {
 		struct u2f_cont_pkt pkt = {
-			.cid = *(u32_t *)(data.tx->data), .seq = data.tx_seq,
+			.cid = *(u32_t *)(data.tx->data),
+			.seq = (u8_t)data.tx_seq,
 		};
 
 		at = U2FHID_PACKET_SIZE +
@@ -188,7 +189,7 @@ static void hid_rx(struct k_work *work)
 
 	SYS_LOG_DBG("");
 
-	req = k_fifo_get(&data.rx_q, K_NO_WAIT);
+	req = (struct net_buf *)k_fifo_get(&data.rx_q, K_NO_WAIT);
 	if (req == NULL) {
 		goto done;
 	}
@@ -208,7 +209,7 @@ static void hid_rx(struct k_work *work)
 
 	net_buf_add_mem(resp, &hdr->cid, sizeof(hdr->cid));
 	net_buf_add_u8(resp, hdr->cmd);
-	bcnt = net_buf_add(resp, 2);
+	bcnt = (u8_t *)net_buf_add(resp, 2);
 
 	switch (hdr->cmd) {
 	case U2FHID_INIT:
@@ -325,6 +326,8 @@ static int hid_get_report_cb(struct usb_setup_packet *setup, s32_t *len,
 
 static struct hid_ops ops = {
 	.get_report = hid_get_report_cb,
+	.get_idle = nullptr,
+	.get_protocol = nullptr,
 	.set_report = hid_set_report_cb,
 };
 
