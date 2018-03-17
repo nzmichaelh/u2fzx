@@ -19,17 +19,21 @@
 #include <usb/class/usb_hid.h>
 
 #include "prng.h"
+#include "error.h"
+#include "stdish.h"
 
 #define TYPE_MASK 0x80
 #define TYPE_INIT 0x80
 #define TYPE_CONT 0x00
 
-#define U2FHID_PING (TYPE_INIT | 0x01)
-#define U2FHID_MSG (TYPE_INIT | 0x03)
-#define U2FHID_LOCK (TYPE_INIT | 0x04)
-#define U2FHID_INIT (TYPE_INIT | 0x06)
-#define U2FHID_WINK (TYPE_INIT | 0x08)
-#define U2FHID_ERROR (TYPE_INIT | 0x3f)
+enum class u2fhid_cmd : u8_t {
+	PING =  (TYPE_INIT | 0x01),
+	MSG =  (TYPE_INIT | 0x03),
+	LOCK =  (TYPE_INIT | 0x04),
+	INIT =  (TYPE_INIT | 0x06),
+	WINK =  (TYPE_INIT | 0x08),
+	ERROR =  (TYPE_INIT | 0x3f),
+};
 
 #define CAPABILITY_WINK 0x01
 #define CAPABILITY_LOCK 0x02
@@ -44,11 +48,11 @@
 extern struct net_buf_pool hid_msg_pool;
 
 void dump_hex(const char *msg, const u8_t *buf, int len);
-int u2f_dispatch(struct net_buf *req, struct net_buf *resp);
+error u2f_dispatch(struct net_buf *req, struct net_buf *resp);
 
 struct u2f_init_hdr {
 	u32_t cid;
-	u8_t cmd;
+	u2fhid_cmd cmd;
 	u8_t bcnt[2];
 	u8_t payload[1];
 };
@@ -56,7 +60,7 @@ BUILD_ASSERT(sizeof(struct u2f_init_hdr) == 8);
 
 struct u2f_init_pkt {
 	u32_t cid;
-	u8_t cmd;
+	u2fhid_cmd cmd;
 	u8_t bcnt[2];
 	u8_t payload[U2FHID_INIT_PAYLOAD_SIZE];
 };
@@ -163,10 +167,8 @@ static void hid_tx(struct k_work *work)
 	k_work_submit(&data.tx_work);
 }
 
-static int hid_handle_init(struct net_buf *req, struct net_buf *resp)
+static error hid_handle_init(struct net_buf *req, struct net_buf *resp)
 {
-	SYS_LOG_DBG("");
-
 	net_buf_add_mem(resp, req->data, 8);
 	net_buf_pull(req, 8);
 	net_buf_add_be32(resp, ++data.next_channel);
@@ -176,7 +178,7 @@ static int hid_handle_init(struct net_buf *req, struct net_buf *resp)
 	net_buf_add_u8(resp, 0);
 	net_buf_add_u8(resp, CAPABILITY_WINK);
 
-	return 0;
+	return error::ok;
 }
 
 static void hid_rx(struct k_work *work)
@@ -185,45 +187,43 @@ static void hid_rx(struct k_work *work)
 	struct net_buf *resp = NULL;
 	struct u2f_init_hdr *hdr;
 	u8_t *bcnt;
-	int err = 0;
-
-	SYS_LOG_DBG("");
 
 	req = (struct net_buf *)k_fifo_get(&data.rx_q, K_NO_WAIT);
 	if (req == NULL) {
-		goto done;
+		return;
 	}
+	auto unref1 = make_guard([&]() { net_buf_unref(req); });
+
+	k_work_submit(work);
 
 	dump_hex("<<", req->data, req->len);
 
 	hdr = (struct u2f_init_hdr *)req->data;
 	net_buf_pull(req, offsetof(struct u2f_init_hdr, payload));
 
-	SYS_LOG_DBG("cid=%x cmd=%x", hdr->cid, hdr->cmd);
-
 	resp = net_buf_alloc(&hid_msg_pool, K_NO_WAIT);
 	if (resp == NULL) {
-		err = -ENOMEM;
-		goto done;
+		return;
 	}
+	auto unref2 = make_guard([&]() { net_buf_unref(resp); });
 
 	net_buf_add_mem(resp, &hdr->cid, sizeof(hdr->cid));
-	net_buf_add_u8(resp, hdr->cmd);
+	net_buf_add_u8(resp, (u8_t)hdr->cmd);
 	bcnt = (u8_t *)net_buf_add(resp, 2);
 
 	switch (hdr->cmd) {
-	case U2FHID_INIT:
-		err = hid_handle_init(req, resp);
+	case u2fhid_cmd::INIT:
+		if (hid_handle_init(req, resp)) {
+			return;
+		}
 		break;
-	case U2FHID_MSG:
-		err = u2f_dispatch(req, resp);
+	case u2fhid_cmd::MSG:
+		if (u2f_dispatch(req, resp)) {
+			return;
+		}
 		break;
 	default:
-		err = -EINVAL;
-	}
-
-	if (err != 0) {
-		goto done;
+		return;
 	}
 
 	sys_put_be16(resp->len - 4 - 1 - 2, bcnt);
@@ -232,17 +232,6 @@ static void hid_rx(struct k_work *work)
 	net_buf_ref(resp);
 	net_buf_put(&data.tx_q, resp);
 	k_work_submit(&data.tx_work);
-
-done:
-	if (resp != NULL) {
-		net_buf_unref(resp);
-	}
-	if (req != NULL) {
-		net_buf_unref(req);
-	}
-	if (!k_fifo_is_empty(&data.rx_q)) {
-		k_work_submit(work);
-	}
 }
 
 static int hid_set_report_cb(struct usb_setup_packet *setup, s32_t *plen,
@@ -256,7 +245,7 @@ static int hid_set_report_cb(struct usb_setup_packet *setup, s32_t *plen,
 	if (len < offsetof(struct u2f_cont_pkt, payload)) {
 		return -EINVAL;
 	}
-	if ((pkt->cmd & TYPE_INIT) != 0) {
+	if (((u8_t)pkt->cmd & TYPE_INIT) != 0) {
 		u16_t bcnt;
 
 		if (len < offsetof(struct u2f_init_pkt, payload)) {
@@ -269,7 +258,6 @@ static int hid_set_report_cb(struct usb_setup_packet *setup, s32_t *plen,
 			return -EINVAL;
 		}
 
-		SYS_LOG_DBG("cmd=%x bcnt=%d", pkt->cmd, bcnt);
 		if (data.rx != NULL) {
 			net_buf_unref(data.rx);
 			data.rx = NULL;
