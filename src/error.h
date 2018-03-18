@@ -28,4 +28,5 @@ struct error {
 	static constexpr struct proxy nomem = ERROR(-ENOMEM);
 	static constexpr struct proxy inval = ERROR(-EINVAL);
 	static constexpr struct proxy exist = ERROR(-EEXIST);
+	static constexpr struct proxy perm = ERROR(-EPERM);
 };

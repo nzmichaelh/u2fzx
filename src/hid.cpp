@@ -21,6 +21,7 @@
 #include "error.h"
 #include "prng.h"
 #include "stdish.h"
+#include "ui.h"
 
 #define TYPE_MASK 0x80
 #define TYPE_INIT 0x80
@@ -348,6 +349,10 @@ void hid_run()
 			break;
 		case u2fhid_cmd::MSG:
 			err = u2f_dispatch(req, resp);
+			break;
+		case u2fhid_cmd::WINK:
+			ui_wink();
+			err = error::ok;
 			break;
 		default:
 			err = ERROR(-ENOENT);

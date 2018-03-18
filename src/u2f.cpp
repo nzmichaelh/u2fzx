@@ -23,6 +23,7 @@
 #include "error.h"
 #include "sfs.h"
 #include "stdish.h"
+#include "ui.h"
 
 #define U2F_EC_FMT_UNCOMPRESSED 0x04
 
@@ -196,6 +197,15 @@ static error u2f_base64url(const slice &src, slice &dest)
 	}
 
 	return error::ok;
+}
+
+extern "C" void u2f_took(const char *msg, int* start)
+{
+	u32_t now = k_uptime_get_32();
+	s32_t took = now - *start;
+	*start = now;
+
+	printk("%d (+%d) %s\n", now, took, msg);
 }
 
 static u16_t u2f_map_err(error err)
@@ -374,16 +384,17 @@ static error u2f_authenticate(int p1, const struct slice &pc, int le,
 	SYS_LOG_DBG("chal=%p app=%p l=%d handle=%p", chal.p, app.p, l,
 		    handle.p);
 
-	if (!chal || !app || l < 0 || !handle) {
+	if (!chal || !app || l != u2f_handle::size || !handle) {
 		return error::inval;
 	}
 
-	dump_hex("chal", chal);
-	dump_hex("app", app);
-	dump_hex("handle", handle);
-
-	if (l != u2f_handle::size) {
+	if (p1 != U2F_AUTHENTICATE_SIGN) {
 		return error::inval;
+	}
+
+	if (!ui_user_present()) {
+		SYS_LOG_INF("user not present");
+		return error::perm;
 	}
 
 	u2f_filename fname;
@@ -397,8 +408,6 @@ static error u2f_authenticate(int p1, const struct slice &pc, int le,
 	if (err != (int)priv.len) {
 		return error::inval;
 	}
-
-	dump_hex("private", priv);
 
 	/* Add user presence */
 	net_buf_add_u8(resp, 1);
@@ -443,14 +452,21 @@ static error u2f_register(int p1, const struct slice &pc, int le,
 	auto chal = pc.get_p(0, 32);
 	auto app = pc.get_p(32, 32);
 	error err;
+	int now = 0;
 
+	u2f_took("start", &now);
 	if (!chal || !app) {
-		SYS_LOG_ERR("lc=%d", pc.len);
 		return error::inval;
 	}
 
+	#if 0
+	if (!ui_user_present()) {
+		return error::perm;
+	}
+	#endif
+
 	/* Add the header */
-	net_buf_add_u8(resp, 0x05);
+	net_buf_add_u8(resp, U2F_REGISTER_ID);
 
 	/* Reserve space for the public key */
 	net_buf_add_u8(resp, U2F_EC_FMT_UNCOMPRESSED);
@@ -461,12 +477,15 @@ static error u2f_register(int p1, const struct slice &pc, int le,
 
 	u2f_key priv;
 
+	u2f_took("pre-generate key", &now);
+
 	/* Generate a new public/private key pair */
 	if (uECC_make_key(pub.p, priv.p, uECC_secp256r1()) !=
 	    TC_CRYPTO_SUCCESS) {
 		SYS_LOG_ERR("uECC_make_key");
 		return error::nomem;
 	}
+	u2f_took("generate key", &now);
 
 	u2f_handle handle;
 
@@ -475,6 +494,7 @@ static error u2f_register(int p1, const struct slice &pc, int le,
 		SYS_LOG_ERR("write_private");
 		return err;
 	}
+	u2f_took("write key", &now);
 
 	net_buf_add_u8(resp, handle.len);
 	net_buf_add_mem(resp, handle.p, handle.len);
@@ -493,6 +513,7 @@ static error u2f_register(int p1, const struct slice &pc, int le,
 	}
 
 	net_buf_add(resp, read);
+	u2f_took("read attest", &now);
 
 	/* Generate the digest */
 	sha256 sha;
@@ -502,7 +523,7 @@ static error u2f_register(int p1, const struct slice &pc, int le,
 		return error::nomem;
 	}
 
-	sha.update<u8_t>(0);
+	sha.update<u8_t>(U2F_REGISTER_HASH_ID);
 	sha.update(app);
 	sha.update(chal);
 	sha.update(handle);
@@ -512,6 +533,7 @@ static error u2f_register(int p1, const struct slice &pc, int le,
 	sha256::digest digest;
 
 	sha.sum(digest);
+	u2f_took("sha", &now);
 
 	/* Generate the signature */
 	u2f_key key;
@@ -523,6 +545,7 @@ static error u2f_register(int p1, const struct slice &pc, int le,
 	if (read != (int)key.len) {
 		return error::inval;
 	}
+	u2f_took("read private", &now);
 
 	u2f_signature signature;
 
@@ -531,6 +554,7 @@ static error u2f_register(int p1, const struct slice &pc, int le,
 		SYS_LOG_ERR("uECC_sign");
 		return error::nomem;
 	}
+	u2f_took("sign", &now);
 
 	net_buf_add_x962(resp, signature);
 
