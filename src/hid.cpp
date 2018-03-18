@@ -8,18 +8,18 @@
 #define SYS_LOG_DOMAIN "hid"
 #include <logging/sys_log.h>
 
+#include <device.h>
+#include <init.h>
 #include <misc/byteorder.h>
 #include <net/buf.h>
 #include <string.h>
 #include <zephyr.h>
-#include <device.h>
-#include <init.h>
 
-#include <usb/usb_device.h>
 #include <usb/class/usb_hid.h>
+#include <usb/usb_device.h>
 
-#include "prng.h"
 #include "error.h"
+#include "prng.h"
 #include "stdish.h"
 
 #define TYPE_MASK 0x80
@@ -27,12 +27,35 @@
 #define TYPE_CONT 0x00
 
 enum class u2fhid_cmd : u8_t {
-	PING =  (TYPE_INIT | 0x01),
-	MSG =  (TYPE_INIT | 0x03),
-	LOCK =  (TYPE_INIT | 0x04),
-	INIT =  (TYPE_INIT | 0x06),
-	WINK =  (TYPE_INIT | 0x08),
-	ERROR =  (TYPE_INIT | 0x3f),
+	PING = TYPE_INIT | 0x01,
+	MSG = TYPE_INIT | 0x03,
+	LOCK = TYPE_INIT | 0x04,
+	INIT = TYPE_INIT | 0x06,
+	WINK = TYPE_INIT | 0x08,
+	ERROR = TYPE_INIT | 0x3f,
+};
+
+enum class u2fhid_err : u8_t {
+	/* No error */
+	NONE = 0x00,
+	/* Invalid command */
+	INVALID_CMD = 0x01,
+	/* Invalid parameter */
+	INVALID_PAR = 0x02,
+	/* Invalid message length */
+	INVALID_LEN = 0x03,
+	/* Invalid message sequencing */
+	INVALID_SEQ = 0x04,
+	/* Message has timed out */
+	MSG_TIMEOUT = 0x05,
+	/* Channel busy */
+	CHANNEL_BUSY = 0x06,
+	/* Command requires channel lock */
+	LOCK_REQUIRED = 0x0a,
+	/* Command not allowed on this cid */
+	INVALID_CID = 0x0b,
+	/* Other unspecified error */
+	OTHER = 0x7f,
 };
 
 #define CAPABILITY_WINK 0x01
@@ -46,6 +69,7 @@ enum class u2fhid_cmd : u8_t {
 #define U2FHID_MAX_PAYLOAD_SIZE (7609)
 
 extern struct net_buf_pool hid_msg_pool;
+extern struct net_buf_pool hid_rx_pool;
 
 void dump_hex(const char *msg, const u8_t *buf, int len);
 error u2f_dispatch(struct net_buf *req, struct net_buf *resp);
@@ -77,19 +101,7 @@ struct hid_data {
 	u32_t next_channel;
 	u32_t cid;
 
-	struct net_buf *rx;
-	u32_t rx_cid;
-	u8_t rx_cmd;
-	u16_t rx_want;
-	u8_t rx_seq;
-	struct k_work rx_work;
 	struct k_fifo rx_q;
-
-	struct k_fifo tx_q;
-	struct k_work tx_work;
-
-	struct net_buf *tx;
-	int tx_seq;
 };
 
 static struct hid_data data;
@@ -119,54 +131,6 @@ static const u8_t hid_report_desc[] = {
 	0xc0, /* END_COLLECTION */
 };
 
-static void hid_tx(struct k_work *work)
-{
-	int err;
-	u32_t wrote;
-	int at;
-	int stride;
-
-	if (data.tx == NULL) {
-		data.tx = net_buf_get(&data.tx_q, K_NO_WAIT);
-		data.tx_seq = -1;
-	}
-	if (data.tx == NULL) {
-		SYS_LOG_DBG("done");
-		return;
-	}
-
-	if (data.tx_seq < 0) {
-		at = 0;
-		stride = U2FHID_PACKET_SIZE;
-		err = usb_write(CONFIG_HID_INT_EP_ADDR, data.tx->data,
-				U2FHID_PACKET_SIZE, &wrote);
-	} else {
-		struct u2f_cont_pkt pkt = {
-			.cid = *(u32_t *)(data.tx->data),
-			.seq = (u8_t)data.tx_seq,
-		};
-
-		at = U2FHID_PACKET_SIZE +
-		     (data.tx_seq * U2FHID_CONT_PAYLOAD_SIZE);
-		stride = U2FHID_CONT_PAYLOAD_SIZE;
-		memcpy(pkt.payload, data.tx->data + at, stride);
-		err = usb_write(CONFIG_HID_INT_EP_ADDR, (u8_t *)&pkt,
-				sizeof(pkt), &wrote);
-	}
-
-	if (err == 0) {
-		prng_feed();
-
-		data.tx_seq++;
-		if (at + stride >= data.tx->len) {
-			net_buf_unref(data.tx);
-			data.tx = NULL;
-		}
-	}
-
-	k_work_submit(&data.tx_work);
-}
-
 static error hid_handle_init(struct net_buf *req, struct net_buf *resp)
 {
 	net_buf_add_mem(resp, req->data, 8);
@@ -181,126 +145,244 @@ static error hid_handle_init(struct net_buf *req, struct net_buf *resp)
 	return error::ok;
 }
 
-static void hid_rx(struct k_work *work)
+static net_buf *hid_rx_pkt(u8_t type, int min_size, int timeout)
 {
-	struct net_buf *req;
-	struct net_buf *resp = NULL;
-	struct u2f_init_hdr *hdr;
-	u8_t *bcnt;
+	auto rx = net_buf_get(&data.rx_q, timeout);
+	autounref rx1{rx};
 
-	req = (struct net_buf *)k_fifo_get(&data.rx_q, K_NO_WAIT);
-	if (req == NULL) {
-		return;
+	if (rx == nullptr) {
+		return nullptr;
 	}
-	auto unref1 = make_guard([&]() { net_buf_unref(req); });
+	dump_hex("<<", rx->data, rx->len);
 
-	k_work_submit(work);
-
-	dump_hex("<<", req->data, req->len);
-
-	hdr = (struct u2f_init_hdr *)req->data;
-	net_buf_pull(req, offsetof(struct u2f_init_hdr, payload));
-
-	resp = net_buf_alloc(&hid_msg_pool, K_NO_WAIT);
-	if (resp == NULL) {
-		return;
+	if (rx->len < min_size) {
+		return nullptr;
 	}
-	auto unref2 = make_guard([&]() { net_buf_unref(resp); });
 
-	net_buf_add_mem(resp, &hdr->cid, sizeof(hdr->cid));
-	net_buf_add_u8(resp, (u8_t)hdr->cmd);
-	bcnt = (u8_t *)net_buf_add(resp, 2);
+	auto hdr = (u2f_init_hdr *)rx->data;
+	if ((static_cast<u8_t>(hdr->cmd) & TYPE_MASK) != type) {
+		return nullptr;
+	}
 
-	switch (hdr->cmd) {
-	case u2fhid_cmd::INIT:
-		if (hid_handle_init(req, resp)) {
-			return;
+	net_buf_ref(rx);
+
+	return rx;
+}
+
+static net_buf *hid_rx(u32_t &cid, u2fhid_cmd &cmd)
+{
+	auto rx = hid_rx_pkt(TYPE_INIT, sizeof(u2f_init_hdr), K_FOREVER);
+	autounref rx1{rx};
+
+	if (rx == nullptr) {
+		return nullptr;
+	}
+
+	auto hdr = (u2f_init_pkt *)rx->data;
+	cid = hdr->cid;
+	cmd = hdr->cmd;
+
+	auto req = net_buf_alloc(&hid_msg_pool, K_NO_WAIT);
+	autounref req1{req};
+
+	if (req == nullptr) {
+		/* No buffers */
+		SYS_LOG_ERR("unable to make a req buffer");
+		return nullptr;
+	}
+
+	auto bcnt = sys_get_be16(hdr->bcnt);
+	if (bcnt > req->size) {
+		SYS_LOG_ERR("bcnt=%d is too big for buf %d", bcnt, req->size);
+		return nullptr;
+	}
+
+	size_t remain = bcnt;
+	/* Take everything from the first packet */
+	size_t take = min(remain, rx->len - offsetof(u2f_init_pkt, payload));
+	net_buf_add_mem(req, hdr->payload, take);
+	remain -= take;
+
+	SYS_LOG_DBG("took %d of bcnt=%d from 1st packet", take, bcnt);
+
+	for (u8_t seq = 0; remain > 0; seq++) {
+		auto crx =
+			hid_rx_pkt(TYPE_CONT, offsetof(u2f_cont_pkt, payload),
+				   K_SECONDS(1));
+		autounref crx1{crx};
+
+		if (crx == nullptr) {
+			SYS_LOG_WRN("timeout while waiting for cont packet");
+			return nullptr;
 		}
-		break;
-	case u2fhid_cmd::MSG:
-		if (u2f_dispatch(req, resp)) {
-			return;
+
+		auto cont = (u2f_cont_pkt *)crx->data;
+		if (cont->seq != seq) {
+			SYS_LOG_WRN("got seq=%d expect %d on cont packet",
+				    cont->seq, seq);
+			return nullptr;
 		}
-		break;
+
+		take = min(remain,
+			   crx->len - offsetof(u2f_cont_pkt, payload));
+		net_buf_add_mem(req, cont->payload, take);
+		SYS_LOG_DBG("took %d of remain=%d from seq=%d", take, remain,
+			    seq);
+
+		remain -= take;
+	}
+
+	net_buf_ref(req);
+	return req;
+}
+
+static u2fhid_err hid_map_error(error err)
+{
+	switch (err.code) {
+	case 0:
+	case -ENOENT:
+		return u2fhid_err::INVALID_CMD;
 	default:
-		return;
+		SYS_LOG_ERR("unmapped error code=%d", err.code);
+		return u2fhid_err::OTHER;
+	}
+}
+
+static error hid_tx_pkt(const u8_t *buf, int len)
+{
+	prng_feed();
+
+	dump_hex(">>", buf, len);
+
+	for (int retry = 0; retry < 10; retry++) {
+		u32_t wrote = 0;
+		error err = ERROR(
+			usb_write(CONFIG_HID_INT_EP_ADDR, buf, len, &wrote));
+
+		switch (err.code) {
+		case 0:
+			return err;
+		case -EAGAIN:
+			k_sleep(K_MSEC(10));
+			break;
+		default:
+			SYS_LOG_ERR("err=%d", err.code);
+			return err;
+		}
 	}
 
-	sys_put_be16(resp->len - 4 - 1 - 2, bcnt);
+	SYS_LOG_ERR("timeout");
+	return error::io;
+}
 
-	dump_hex(">>", resp->data, resp->len);
-	net_buf_ref(resp);
-	net_buf_put(&data.tx_q, resp);
-	k_work_submit(&data.tx_work);
+static void hid_tx(u32_t cid, u2fhid_cmd cmd, net_buf *resp)
+{
+	size_t bcnt = resp->len;
+	const u8_t *p = resp->data;
+
+	{
+		u2f_init_pkt init = {
+			.cid = cid,
+			.cmd = cmd,
+		};
+
+		sys_put_be16(bcnt, init.bcnt);
+
+		size_t take = min(sizeof(init.payload), bcnt);
+		std::copy(p, p + take, init.payload);
+
+		SYS_LOG_DBG("writing %d of %d in 1st packet", take, bcnt);
+
+		if (hid_tx_pkt((u8_t *)&init, sizeof(init))) {
+			return;
+		}
+		bcnt -= take;
+		p += take;
+	}
+
+	for (u8_t seq = 0; bcnt > 0; seq++) {
+		u2f_cont_pkt cont = {
+			.cid = cid,
+			.seq = seq,
+		};
+
+		int take = min(sizeof(cont.payload), bcnt);
+		std::copy(p, p + take, cont.payload);
+
+		if (hid_tx_pkt((u8_t *)&cont, sizeof(cont))) {
+			return;
+		}
+
+		bcnt -= take;
+		p += take;
+	}
+}
+
+void hid_run()
+{
+	for (;;) {
+		// Receive a packet and ensure it's released later.
+		u32_t cid = 0;
+		u2fhid_cmd cmd = u2fhid_cmd::ERROR;
+
+		auto req = hid_rx(cid, cmd);
+		autounref unref1{req};
+
+		if (req == nullptr) {
+			continue;
+		}
+
+		// Allocate the response buf.
+		auto resp = net_buf_alloc(&hid_msg_pool, K_NO_WAIT);
+		autounref resp1{resp};
+
+		if (resp == nullptr) {
+			continue;
+		}
+
+		error err;
+
+		switch (cmd) {
+		case u2fhid_cmd::INIT:
+			err = hid_handle_init(req, resp);
+			break;
+		case u2fhid_cmd::MSG:
+			err = u2f_dispatch(req, resp);
+			break;
+		default:
+			err = ERROR(-ENOENT);
+			break;
+		}
+
+		if (err) {
+			net_buf_reset(resp);
+			net_buf_add_u8(resp,
+				       static_cast<u8_t>(hid_map_error(err)));
+			hid_tx(cid, u2fhid_cmd::ERROR, resp);
+		} else {
+			hid_tx(cid, cmd, resp);
+		}
+	}
 }
 
 static int hid_set_report_cb(struct usb_setup_packet *setup, s32_t *plen,
 			     u8_t **pdata)
 {
-	struct u2f_init_pkt *pkt = (struct u2f_init_pkt *)*pdata;
-	int len = *plen;
+	size_t len = *plen;
 
 	prng_feed();
 
-	if (len < offsetof(struct u2f_cont_pkt, payload)) {
-		return -EINVAL;
+	auto buf = net_buf_alloc(&hid_rx_pool, K_NO_WAIT);
+	if (buf == nullptr) {
+		return -ENOMEM;
 	}
-	if (((u8_t)pkt->cmd & TYPE_INIT) != 0) {
-		u16_t bcnt;
-
-		if (len < offsetof(struct u2f_init_pkt, payload)) {
-			SYS_LOG_ERR("init packet too short");
-			return -EINVAL;
-		}
-		bcnt = sys_get_be16(pkt->bcnt);
-		if (bcnt > U2FHID_MAX_PAYLOAD_SIZE) {
-			SYS_LOG_ERR("bcnt too big");
-			return -EINVAL;
-		}
-
-		if (data.rx != NULL) {
-			net_buf_unref(data.rx);
-			data.rx = NULL;
-		}
-
-		data.rx = net_buf_alloc(&hid_msg_pool, K_NO_WAIT);
-		if (data.rx == NULL) {
-			SYS_LOG_ERR("No memory");
-			return -ENOMEM;
-		}
-
-		data.rx_cid = pkt->cid;
-		data.rx_want = bcnt + offsetof(struct u2f_init_pkt, payload);
-		data.rx_seq = 0;
-
-		net_buf_add_mem(data.rx, (u8_t *)pkt, len);
-	} else {
-		struct u2f_cont_pkt *cont = (struct u2f_cont_pkt *)*pdata;
-
-		if (data.rx == NULL) {
-			SYS_LOG_ERR("no rx buf");
-			return -EINVAL;
-		}
-		if (cont->cid != data.rx_cid) {
-			SYS_LOG_ERR("cid changed");
-			return -EINVAL;
-		}
-		if (cont->seq != data.rx_seq) {
-			SYS_LOG_ERR("seq out of order");
-			return -EINVAL;
-		}
-		data.rx_seq = cont->seq + 1;
-		SYS_LOG_DBG("seq=%x", cont->seq);
-
-		net_buf_add_mem(data.rx, cont->payload, len - 5);
+	if (len > net_buf_tailroom(buf)) {
+		net_buf_unref(buf);
+		return -ENOMEM;
 	}
 
-	if (data.rx != NULL && data.rx->len >= data.rx_want) {
-		SYS_LOG_DBG("dispatch");
-		net_buf_put(&data.rx_q, data.rx);
-		data.rx = NULL;
-		k_work_submit(&data.rx_work);
-	}
+	net_buf_add_mem(buf, *pdata, len);
+	net_buf_put(&data.rx_q, buf);
 
 	return 0;
 }
@@ -322,9 +404,6 @@ static struct hid_ops ops = {
 static int hid_init(struct device *dev)
 {
 	k_fifo_init(&data.rx_q);
-	k_fifo_init(&data.tx_q);
-	k_work_init(&data.tx_work, hid_tx);
-	k_work_init(&data.rx_work, hid_rx);
 
 	usb_hid_register_device(hid_report_desc, sizeof(hid_report_desc),
 				&ops);

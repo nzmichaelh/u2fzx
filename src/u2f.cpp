@@ -659,7 +659,9 @@ error u2f_dispatch(struct net_buf *req, struct net_buf *resp)
 		break;
 	}
 
-	SYS_LOG_ERR("err=%d", err.code);
+	if (err) {
+		SYS_LOG_ERR("err=%d", err.code);
+	}
 
 	net_buf_add_be16(resp, u2f_map_err(err));
 

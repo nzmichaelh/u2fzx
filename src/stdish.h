@@ -1,5 +1,7 @@
 #pragma once
 
+#include <net/buf.h>
+
 namespace std {
 
 template<class InputIt, class OutputIt>
@@ -15,16 +17,15 @@ OutputIt copy(InputIt first, InputIt last,
 
 }
 
-template <typename F>
-struct scopeguard {
-	scopeguard(F f) : f_(f) {}
-	~scopeguard() { f_(); }
+struct autounref {
+	autounref(struct net_buf *buf) : buf_{buf} {}
+	~autounref() {
+		if (buf_ != nullptr) {
+			net_buf_unref(buf_);
+			buf_ = nullptr;
+		}
+	}
 
 private:
-	F f_;
-};
-
-template <typename F>
-scopeguard<F> make_guard(F f) {
-	return scopeguard<F>(f);
+	struct net_buf* buf_;
 };

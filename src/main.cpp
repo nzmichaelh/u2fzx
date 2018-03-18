@@ -10,11 +10,13 @@
 
 #include <zephyr.h>
 
+void hid_run();
+
 void main(void)
 {
 	SYS_LOG_DBG("Starting application");
 
 	for (;;) {
-		k_sleep(K_SECONDS(2));
+		hid_run();
 	}
 }
