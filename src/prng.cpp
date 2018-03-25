@@ -15,48 +15,20 @@
 #include <tinycrypt/hmac_prng.h>
 #include <tinycrypt/ecc_platform_specific.h>
 
+extern "C" {
+#include <mbedtls/entropy.h>
+#include <mbedtls/ctr_drbg.h>
+}
+
 #include "prng.h"
 
 struct prng_data {
-	struct tc_hmac_prng_struct prng;
-	u32_t entropy[17];
-	u8_t at;
+	mbedtls_entropy_context entropy;
+	mbedtls_ctr_drbg_context ctr_drbg;
+	u32_t personalization[6];
 };
 
 static struct prng_data data;
-
-void prng_add_entropy(u32_t ch)
-{
-	data.entropy[data.at++] = ch;
-	if (data.at >= ARRAY_SIZE(data.entropy)) {
-		data.at = 0;
-	}
-}
-
-int default_CSPRNG(u8_t *buf, unsigned int len)
-{
-	int err;
-
-	for (;;) {
-		err = tc_hmac_prng_generate(buf, len, &data.prng);
-
-		switch (err) {
-		case TC_CRYPTO_SUCCESS:
-			return err;
-		case TC_HMAC_PRNG_RESEED_REQ:
-			prng_feed();
-			err = tc_hmac_prng_reseed(
-				&data.prng, (u8_t *)data.entropy,
-				sizeof(data.entropy), NULL, 0);
-			if (err != TC_CRYPTO_SUCCESS) {
-				return err;
-			}
-			break;
-		default:
-			return TC_CRYPTO_FAIL;
-		}
-	}
-}
 
 static int prng_init(struct device *dev)
 {
@@ -64,11 +36,19 @@ static int prng_init(struct device *dev)
 
 	prng_board_init();
 
-	err = tc_hmac_prng_init(&data.prng, (u8_t *)data.entropy,
-				sizeof(data.entropy));
-	if (err != TC_CRYPTO_SUCCESS) {
-		return -ENOMEM;
+	mbedtls_entropy_init(&data.entropy);
+
+	err = mbedtls_ctr_drbg_seed(
+		&data.ctr_drbg,
+		mbedtls_entropy_func,
+		&data.entropy,
+		(const unsigned char *)data.personalization,
+		sizeof(data.personalization));
+
+	if (err != 0) {
+		return err;
 	}
+
 	return 0;
 }
 

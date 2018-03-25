@@ -9,11 +9,17 @@
 #include <logging/sys_log.h>
 
 #include <zephyr.h>
+#include "crypto.h"
 
 void hid_run();
 
 void main(void)
 {
+	auto err = u2f_crypto_init();
+	if (err) {
+		SYS_LOG_ERR("crypto=%d", err.code);
+	}
+
 	SYS_LOG_DBG("Starting application");
 
 	for (;;) {

@@ -6,6 +6,9 @@
 
 #pragma once
 
+#include <errno.h>
+#include <zephyr/types.h>
+
 #define ERROR(_code) { .code = static_cast<s16_t>(_code) }
 
 struct error {

@@ -18,12 +18,19 @@
 #include <tinycrypt/ecc_dh.h>
 #include <tinycrypt/ecc_dsa.h>
 #include <tinycrypt/ecc_platform_specific.h>
-#include <tinycrypt/sha256.h>
+
+extern "C" {
+#include <mbedtls/ecdsa.h>
+#include <mbedtls/ecp.h>
+#include <mbedtls/bignum.h>
+}
 
 #include "error.h"
 #include "sfs.h"
 #include "stdish.h"
 #include "ui.h"
+#include "util.h"
+#include "crypto.h"
 
 #define U2F_EC_FMT_UNCOMPRESSED 0x04
 
@@ -73,60 +80,7 @@
 #define U2F_PRIVATE_KEY_NAME "/attest.pk"
 #define U2F_CERTIFICATE_NAME "/attest.der"
 
-struct slice {
-	u8_t *p;
-	size_t len;
-
-	slice get_p(off_t offset, size_t len) const;
-	int get_u8(off_t offset) const;
-
-	explicit operator bool() const { return len > 0; }
-	const char *str() const { return (const char *)p; }
-
-	const u8_t *cbegin() const { return p; }
-	const u8_t *cend() const { return p + len; }
-};
-
-slice slice::get_p(off_t offset, size_t len) const
-{
-	if (offset < 0 || len < 0) {
-		return {nullptr};
-	}
-	if (offset + len > this->len) {
-		return {nullptr};
-	}
-	return {.p = p + offset, .len = len};
-}
-
-int slice::get_u8(off_t offset) const
-{
-	auto s = get_p(offset, 1);
-
-	if (!s) {
-		return -EINVAL;
-	}
-	return s.p[0];
-}
-
-struct str_slice : public slice {
-	str_slice(const char *msg)
-	{
-		p = (u8_t *)msg;
-		len = strlen(msg);
-	}
-};
-
-template <int N> struct fixed_slice : public slice {
-	static const int size = N;
-
-	fixed_slice()
-	{
-		p = buf_;
-		len = N;
-	}
-
-      private:
-	u8_t buf_[N];
+struct u2f_data {
 };
 
 using u2f_key = fixed_slice<32>;
@@ -134,46 +88,7 @@ using u2f_signature = fixed_slice<64>;
 using u2f_filename = fixed_slice<MAX_FILE_NAME + 1>;
 using u2f_handle = fixed_slice<8>;
 
-struct sha256 {
-	using digest = fixed_slice<TC_SHA256_DIGEST_SIZE>;
-
-	int init();
-
-	void update(const slice &sl);
-	template <int N> void update(const fixed_slice<N> &sl)
-	{
-		update(static_cast<const slice &>(sl));
-	}
-	template <typename T> void update(T ch);
-
-	void sum(slice &sl);
-
-      private:
-	struct tc_sha256_state_struct sha_;
-};
-
-int sha256::init() { return tc_sha256_init(&sha_); }
-
-void sha256::update(const slice &sl)
-{
-	tc_sha256_update(&sha_, sl.p, sl.len);
-}
-
-template <typename T> void sha256::update(T ch)
-{
-	u8_t buf[sizeof(ch)];
-
-	for (int i = sizeof(ch) - 1; i >= 0; i--) {
-		buf[i] = static_cast<u8_t>(ch);
-		ch >>= 8;
-	}
-
-	tc_sha256_update(&sha_, buf, sizeof(buf));
-}
-
-void sha256::sum(slice &sl) { tc_sha256_final(sl.p, &sha_); }
-
-static error u2f_base64url(const slice &src, slice &dest)
+error u2f_base64url(const slice &src, slice &dest)
 {
 	static const char alphabet[] = "ABCDEFGHIJKLMNOP"
 				       "QRSTUVWXYZabcdef"
@@ -240,7 +155,7 @@ static void u2f_make_filename(const slice &handle, u2f_filename &fname)
 
 void dump_hex(const char *msg, const u8_t *buf, int len)
 {
-	printk("%s(%d): ", msg, len);
+	printk("%u %s(%d): ", k_uptime_get_32(), msg, len);
 	for (int i = 0; i < len; i++) {
 		printk(" %x", buf[i]);
 	}
@@ -266,6 +181,17 @@ static int net_buf_add_varint(struct net_buf *resp, const slice &sl)
 	return sl.len + 1 + 1;
 }
 
+static int net_buf_add_varint(struct net_buf *resp, const mbedtls_mpi& m)
+{
+	fixed_slice<32> sl;
+	if (mbedtls_mpi_write_binary(&m, sl.p, sl.len) != 0) {
+		SYS_LOG_ERR("write_binary size=%d", mbedtls_mpi_size(&m));
+		return 0;
+	}
+
+	return net_buf_add_varint(resp, sl);
+}
+
 static void net_buf_add_x962(struct net_buf *resp, const slice &signature)
 {
 	/* Encode the signature in X9.62 format */
@@ -276,6 +202,18 @@ static void net_buf_add_x962(struct net_buf *resp, const slice &signature)
 
 	*len += net_buf_add_varint(resp, signature.get_p(0, 32));
 	*len += net_buf_add_varint(resp, signature.get_p(32, 32));
+}
+
+static void net_buf_add_x962(struct net_buf *resp, const mbedtls_mpi& r, const mbedtls_mpi s)
+{
+	/* Encode the signature in X9.62 format */
+	net_buf_add_u8(resp, 0x30);
+	u8_t *len = (u8_t *)net_buf_add(resp, 1);
+
+	*len = 0;
+
+	*len += net_buf_add_varint(resp, r);
+	*len += net_buf_add_varint(resp, s);
 }
 
 static error u2f_write_file(const slice &fname, const slice &pc)
@@ -332,21 +270,22 @@ static int u2f_read_file(const slice &fname, slice &buf)
 	return status;
 }
 
-static error u2f_write_private(const slice &priv, slice &handle)
+static error u2f_write_private(mbedtls_mpi &priv, slice &handle)
 {
 	for (;;) {
 		struct sfs_dirent entry;
-		fixed_slice<6> key;
+		fixed_slice<6> raw;
 		error err;
 
 		/* Create a handle */
-		if (default_CSPRNG(key.p, key.len) != TC_CRYPTO_SUCCESS) {
-			SYS_LOG_ERR("default_CSPRNG");
-			return error::io;
+		err = u2f_rng(raw);
+		if (err) {
+			SYS_LOG_ERR("make handle");
+			return err;
 		}
 
 		/* Make the handle printable */
-		err = u2f_base64url(key, handle);
+		err = u2f_base64url(raw, handle);
 		if (err) {
 			SYS_LOG_ERR("base64_encode err=%d", err.code);
 			return error::nomem;
@@ -361,7 +300,13 @@ static error u2f_write_private(const slice &priv, slice &handle)
 			continue;
 		}
 
-		err = u2f_write_file(fname, priv);
+		u2f_key key;
+		if (mbedtls_mpi_write_binary(&priv, key.p, key.len) != 0) {
+			SYS_LOG_ERR("write_binary len=%d", mbedtls_mpi_size(&priv));
+			return error::nomem;
+		}
+
+		err = u2f_write_file(fname, key);
 		if (err) {
 			return err;
 		}
@@ -434,14 +379,42 @@ static error u2f_authenticate(int p1, const struct slice &pc, int le,
 
 	/* Generate the signature */
 	u2f_signature signature;
+	mbedtls_ecp_group grp;
+	mbedtls_mpi r, s, d;
 
-	if (uECC_sign(priv.p, digest.p, digest.len, signature.p,
-		      uECC_secp256r1()) != TC_CRYPTO_SUCCESS) {
-		SYS_LOG_ERR("uECC_sign");
+	mbedtls_mpi_init(&r);
+	mbedtls_mpi_init(&s);
+	mbedtls_mpi_init(&d);
+	mbedtls_ecp_group_init(&grp);
+
+	int status = mbedtls_mpi_read_binary(&r, signature.p, 32);
+	if (status != 0) {
+		SYS_LOG_ERR("read r err=%d", status);
+		return error::nomem;
+	}
+	status = mbedtls_mpi_read_binary(&s, signature.p + 32, 32);
+	if (status != 0) {
+		SYS_LOG_ERR("read s err=%d", status);
+		return error::nomem;
+	}
+	status = mbedtls_mpi_read_binary(&d, priv.p, priv.len);
+	if (status != 0) {
+		SYS_LOG_ERR("read d err=%d", status);
 		return error::nomem;
 	}
 
-	net_buf_add_x962(resp, signature);
+	if (mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_SECP256R1)) {
+		SYS_LOG_ERR("group_load");
+		return error::nomem;
+	}
+	if (mbedtls_ecdsa_sign(&grp, &r, &s,
+			       &d, digest.p, digest.len,
+			       u2f_mbedtls_rng, nullptr)) {
+		SYS_LOG_ERR("sign");
+		return error::nomem;
+	}
+
+	net_buf_add_x962(resp, r, s);
 
 	return error::ok;
 }
@@ -453,6 +426,7 @@ static error u2f_register(int p1, const struct slice &pc, int le,
 	auto app = pc.get_p(32, 32);
 	error err;
 	int now = 0;
+	size_t len;
 
 	u2f_took("start", &now);
 	if (!chal || !app) {
@@ -469,27 +443,37 @@ static error u2f_register(int p1, const struct slice &pc, int le,
 	net_buf_add_u8(resp, U2F_REGISTER_ID);
 
 	/* Reserve space for the public key */
-	net_buf_add_u8(resp, U2F_EC_FMT_UNCOMPRESSED);
 	slice pub = {
-		.p = (u8_t *)net_buf_add(resp, 64),
-		.len = 64,
+		.p = (u8_t *)net_buf_add(resp, 65),
+		.len = 65,
 	};
-
-	u2f_key priv;
 
 	u2f_took("pre-generate key", &now);
 
+	mbedtls_ecdsa_context ctx;
+	mbedtls_ecdsa_init(&ctx);
+
 	/* Generate a new public/private key pair */
-	if (uECC_make_key(pub.p, priv.p, uECC_secp256r1()) !=
-	    TC_CRYPTO_SUCCESS) {
-		SYS_LOG_ERR("uECC_make_key");
+	int status = mbedtls_ecdsa_genkey(&ctx, MBEDTLS_ECP_DP_SECP256R1, u2f_mbedtls_rng, nullptr);
+	if (status != 0) {
+		SYS_LOG_ERR("uECC_make_key s=%d", status);
 		return error::nomem;
 	}
+	status = mbedtls_ecp_point_write_binary(&ctx.grp, &ctx.Q, MBEDTLS_ECP_PF_UNCOMPRESSED, &len, pub.p, pub.len);
+	if (status != 0) {
+		SYS_LOG_ERR("write_binary s=%d", status);
+		return error::nomem;
+	}
+	if (len != pub.len) {
+		SYS_LOG_ERR("write_binary short %d != %d", len, pub.len);
+		return error::nomem;
+	}
+
 	u2f_took("generate key", &now);
 
 	u2f_handle handle;
 
-	err = u2f_write_private(priv, handle);
+	err = u2f_write_private(ctx.d, handle);
 	if (err) {
 		SYS_LOG_ERR("write_private");
 		return err;
@@ -528,7 +512,7 @@ static error u2f_register(int p1, const struct slice &pc, int le,
 	sha.update(chal);
 	sha.update(handle);
 	sha.update<u8_t>(U2F_EC_FMT_UNCOMPRESSED);
-	sha.update(pub);
+	sha.update(pub, 1);
 
 	sha256::digest digest;
 
@@ -547,16 +531,22 @@ static error u2f_register(int p1, const struct slice &pc, int le,
 	}
 	u2f_took("read private", &now);
 
-	u2f_signature signature;
+//	u2f_signature signature;
 
-	if (uECC_sign(key.p, digest.p, digest.len, signature.p,
-		      uECC_secp256r1()) != TC_CRYPTO_SUCCESS) {
+	mbedtls_mpi r, s, a;
+
+	mbedtls_mpi_init(&r);
+	mbedtls_mpi_init(&s);
+	mbedtls_mpi_init(&a);
+	mbedtls_mpi_read_binary(&a, key.p, key.len);
+
+	if (mbedtls_ecdsa_sign(&ctx.grp, &r, &s, &a, digest.p, digest.len, u2f_mbedtls_rng, nullptr) != 0) {
 		SYS_LOG_ERR("uECC_sign");
 		return error::nomem;
 	}
 	u2f_took("sign", &now);
 
-	net_buf_add_x962(resp, signature);
+	net_buf_add_x962(resp, r, s); //signature);
 
 	return error::ok;
 }

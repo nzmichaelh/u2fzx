@@ -103,6 +103,7 @@ struct hid_data {
 	u32_t cid;
 
 	struct k_fifo rx_q;
+	struct k_sem tx_sem;
 };
 
 static struct hid_data data;
@@ -253,7 +254,7 @@ static error hid_tx_pkt(const u8_t *buf, int len)
 {
 	prng_feed();
 
-	dump_hex(">>", buf, len);
+//	dump_hex(">>", buf, len);
 
 	for (int retry = 0; retry < 10; retry++) {
 		u32_t wrote = 0;
@@ -264,7 +265,7 @@ static error hid_tx_pkt(const u8_t *buf, int len)
 		case 0:
 			return err;
 		case -EAGAIN:
-			k_sleep(K_MSEC(10));
+			k_sem_take(&data.tx_sem, K_MSEC(100));
 			break;
 		default:
 			SYS_LOG_ERR("err=%d", err.code);
@@ -278,6 +279,8 @@ static error hid_tx_pkt(const u8_t *buf, int len)
 
 static void hid_tx(u32_t cid, u2fhid_cmd cmd, net_buf *resp)
 {
+	u32_t start = k_uptime_get_32();
+
 	size_t bcnt = resp->len;
 	const u8_t *p = resp->data;
 
@@ -317,6 +320,8 @@ static void hid_tx(u32_t cid, u2fhid_cmd cmd, net_buf *resp)
 		bcnt -= take;
 		p += take;
 	}
+
+	SYS_LOG_DBG("tx in %d", (int)(k_uptime_get_32() - start));
 }
 
 void hid_run()
@@ -399,16 +404,24 @@ static int hid_get_report_cb(struct usb_setup_packet *setup, s32_t *len,
 	return 0;
 }
 
+static void hid_int_in_ready(void)
+{
+	k_sem_give(&data.tx_sem);
+}
+
 static struct hid_ops ops = {
 	.get_report = hid_get_report_cb,
 	.get_idle = nullptr,
 	.get_protocol = nullptr,
 	.set_report = hid_set_report_cb,
+	.set_idle = nullptr,
+	.int_in_ready = hid_int_in_ready,
 };
 
 static int hid_init(struct device *dev)
 {
 	k_fifo_init(&data.rx_q);
+	k_sem_init(&data.tx_sem, 1, 2);
 
 	usb_hid_register_device(hid_report_desc, sizeof(hid_report_desc),
 				&ops);
