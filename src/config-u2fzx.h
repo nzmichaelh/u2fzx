@@ -34,6 +34,9 @@
 #ifndef MBEDTLS_CONFIG_H
 #define MBEDTLS_CONFIG_H
 
+extern void *stderr;
+void u2f_fprintf(void *, const char *, ...);
+
 /* System support */
 #define MBEDTLS_PLATFORM_C
 #define MBEDTLS_PLATFORM_MEMORY
@@ -47,8 +50,9 @@
 #define MBEDTLS_TIMING_C
 #define MBEDTLS_TIMING_ALT
 #define MBEDTLS_ENTROPY_NV_SEED
-
+#define MBEDTLS_MEMORY_DEBUG
 #define MBEDTLS_HAVE_ASM
+#define MBEDTLS_PLATFORM_FPRINTF_MACRO u2f_fprintf
 
 /* mbed TLS feature support */
 #define MBEDTLS_AES_ROM_TABLES

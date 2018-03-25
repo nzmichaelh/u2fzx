@@ -5,13 +5,6 @@
 #include "crypto.h"
 #include "sfs.h"
 
-extern "C" {
-#include <mbedtls/ecdsa.h>
-#include <mbedtls/ecp.h>
-#include <mbedtls/entropy.h>
-#include <mbedtls/ctr_drbg.h>
-}
-
 #define U2F_SEED "/seed"
 
 struct crypto {
@@ -21,16 +14,16 @@ struct crypto {
 
 static crypto crypto;
 
-int sha256::init() { return tc_sha256_init(&sha_); }
-
 void sha256::update(const slice &sl, size_t drop)
 {
 	if (sl && drop < sl.len) {
-		tc_sha256_update(&sha_, sl.p + drop, sl.len - drop);
+		mbedtls_sha256_update_ret(&sha_, sl.p + drop, sl.len - drop);
 	}
 }
 
-void sha256::sum(slice &sl) { tc_sha256_final(sl.p, &sha_); }
+void sha256::sum(slice &sl) {
+	mbedtls_sha256_finish_ret(&sha_, sl.p);
+}
 
 int u2f_mbedtls_rng(void *ctx, u8_t* buf, size_t len)
 {
@@ -105,4 +98,15 @@ error u2f_crypto_init()
 			     &crypto.ctr_drbg,
 			     mbedtls_entropy_func, &crypto.entropy,
 			     NULL, 0));
+}
+
+void *stderr;
+
+extern "C" void u2f_fprintf(void *ignore, const char *fmt, ...)
+{
+	va_list ap;
+
+	va_start(ap, fmt);
+	vprintk(fmt, ap);
+	va_end(ap);
 }

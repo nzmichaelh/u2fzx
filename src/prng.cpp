@@ -11,10 +11,6 @@
 #include <string.h>
 #include <zephyr.h>
 
-#include <tinycrypt/constants.h>
-#include <tinycrypt/hmac_prng.h>
-#include <tinycrypt/ecc_platform_specific.h>
-
 extern "C" {
 #include <mbedtls/entropy.h>
 #include <mbedtls/ctr_drbg.h>
