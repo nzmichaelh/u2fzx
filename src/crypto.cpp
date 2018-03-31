@@ -2,6 +2,7 @@
 #define SYS_LOG_DOMAIN "crypto"
 #include <logging/sys_log.h>
 
+#include "crypto.h"
 #include "sfs.h"
 #include "util.h"
 

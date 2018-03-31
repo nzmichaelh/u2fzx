@@ -14,24 +14,29 @@ template <typename T> struct span {
 	T *end() { return p_ + size_; }
 	const T *cbegin() const { return p_; }
 	const T *cend() const { return p_ + size_; }
+	const T *data() const { return p_; }
 	size_t size() const { return size_; }
 	bool empty() const { return p_ == nullptr || size_ <= 0; }
-	int at(int off)
+	T at(size_t off) const
 	{
-		if (empty() || off < 0) {
-			return -1;
+		if (empty()) {
+			return 0;
 		}
 		return p_[off];
 	}
-	template <typename U> span<U> cast()
+	template <typename U> span<U> cast() const
 	{
 		return {(U *)p_, size_ * sizeof(T) / sizeof(U)};
 	}
-
-	explicit operator bool() const { return size() > 0; }
+	const span<T> subspan(size_t off, size_t size) const {
+		if (off + size > size) {
+			return {};
+		}
+		return {p_ + off, size_ - size};
+	}
 
       protected:
-	span() {}
+		span() : p_{nullptr}, size_{0} {}
 
 	T *p_;
 	size_t size_;

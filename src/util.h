@@ -37,40 +37,6 @@ struct error {
 	static constexpr struct proxy nospc = ERROR(-ENOSPC);
 };
 
-struct slice : gtl::span<u8_t> {
-	slice(const u8_t *p, size_t len) : span<u8_t>()
-	{
-		p_ = (u8_t *)p;
-		size_ = len;
-	}
-
-	slice get_p(ptrdiff_t offset, size_t len) const
-	{
-		if (offset < 0 || len < 0) {
-			return {nullptr, 0};
-		}
-		if (offset + len > this->size()) {
-			return {nullptr, 0};
-		}
-		return {cbegin() + offset, len};
-	}
-
-	int get_u8(ptrdiff_t offset) const;
-
-	const char *str() const { return (const char *)cbegin(); }
-};
-
-struct str_slice : public slice {
-	str_slice(const char *msg) : slice((u8_t *)msg, strlen(msg)) {}
-};
-
-template <int N> struct fixed_slice : public slice {
-	fixed_slice() : slice(buf_, N) {}
-
-      private:
-	u8_t buf_[N];
-};
-
 struct string {
 	string(const char *p) : p_{(const u8_t *)p} {}
 	string(const u8_t *p) : p_{p} {}
@@ -83,7 +49,7 @@ struct string {
 
 void u2f_took(const char *msg, int *start);
 void u2f_dump_hex(const char *msg, const u8_t *buf, int len);
-void u2f_dump_hex(const char *msg, const slice &s);
+void u2f_dump_hex(const char *msg, const gtl::span<u8_t> &s);
 
 template <typename T> error u2f_write_file(string fname, const T &pc)
 {

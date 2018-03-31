@@ -8,6 +8,8 @@
 #define SYS_LOG_DOMAIN "u2f"
 #include <logging/sys_log.h>
 
+#include <optional>
+
 #include <misc/__assert.h>
 #include <misc/byteorder.h>
 #include <net/buf.h>
@@ -81,8 +83,10 @@ static u16_t u2f_map_err(error err)
 	}
 }
 
-static void u2f_make_filename(gtl::span<char> handle, u2f_filename &fname)
+static u2f_filename u2f_make_filename(const gtl::span<char> handle)
 {
+	u2f_filename fname;
+
 	auto *p = fname.begin();
 	*p++ = '/';
 	std::copy(handle.cbegin(), handle.cend(), p);
@@ -90,40 +94,38 @@ static void u2f_make_filename(gtl::span<char> handle, u2f_filename &fname)
 	*p++ = '.';
 	*p++ = 'k';
 	*p++ = '\0';
+
+	return fname;
 }
 
-static size_t net_buf_add_der(struct net_buf *resp, gtl::span<u8_t> sp)
+/* Add a key as a ASN.1 integer to the response */
+static size_t net_buf_add_integer(struct net_buf *resp, const mpi &m)
 {
-	bool pad = (sp.at(0) & 0x80) != 0;
-	auto len = sp.size();
+	u2f_key sl;
+	if (mbedtls_mpi_write_binary(&m.w, sl.begin(), sl.size()) != 0) {
+		SYS_LOG_ERR("write_binary size=%d", mbedtls_mpi_size(&m.w));
+		return 0;
+	}
 
-	if (pad) {
+	bool leading_zero = (sl[0] & 0x80) != 0;
+	auto len = sl.size();
+
+	if (leading_zero) {
 		len++;
 	}
 
 	net_buf_add_u8(resp, MBEDTLS_ASN1_INTEGER);
 	net_buf_add_u8(resp, len);
-	if (pad) {
+	if (leading_zero) {
 		net_buf_add_u8(resp, 0);
 	}
-	net_buf_add_mem(resp, sp.cbegin(), sp.size());
+	net_buf_add_mem(resp, sl.cbegin(), sl.size());
 
 	return len + 1 + 1;
 }
 
-static int net_buf_add_varint(struct net_buf *resp, const mbedtls_mpi &m)
-{
-	u2f_key sl;
-	if (mbedtls_mpi_write_binary(&m, sl.begin(), sl.size()) != 0) {
-		SYS_LOG_ERR("write_binary size=%d", mbedtls_mpi_size(&m));
-		return 0;
-	}
-
-	return net_buf_add_der(resp, gtl::span<u8_t>(sl));
-}
-
-static void net_buf_add_x962(struct net_buf *resp, const mbedtls_mpi &r,
-			     const mbedtls_mpi s)
+/* Add a key pair as a X9.64 pair to the response */
+static void net_buf_add_x962(struct net_buf *resp, const mpi &r, const mpi &s)
 {
 	/* Encode the signature in X9.62 format */
 	net_buf_add_u8(resp,
@@ -131,12 +133,11 @@ static void net_buf_add_x962(struct net_buf *resp, const mbedtls_mpi &r,
 	u8_t *len = (u8_t *)net_buf_add(resp, 1);
 
 	*len = 0;
-
-	*len += net_buf_add_varint(resp, r);
-	*len += net_buf_add_varint(resp, s);
+	*len += net_buf_add_integer(resp, r);
+	*len += net_buf_add_integer(resp, s);
 }
 
-static error u2f_read_key(string fname, mpi &key)
+static error u2f_read_key(const string fname, mpi &key)
 {
 	u2f_key buf;
 
@@ -155,7 +156,7 @@ static error u2f_read_key(string fname, mpi &key)
 	return error::ok;
 }
 
-static error u2f_write_private(mbedtls_mpi &priv, gtl::span<char> handle)
+static std::optional<u2f_handle> u2f_write_private(const mbedtls_mpi &priv)
 {
 	for (;;) {
 		struct sfs_dirent entry;
@@ -166,19 +167,19 @@ static error u2f_write_private(mbedtls_mpi &priv, gtl::span<char> handle)
 		err = u2f_rng(raw);
 		if (err) {
 			SYS_LOG_ERR("make handle");
-			return err;
+			return {};
 		}
+
+		u2f_handle handle;
 
 		/* Make the handle printable */
 		err = u2f_base64url(raw, handle);
 		if (err) {
 			SYS_LOG_ERR("base64_encode err=%d", err.code);
-			return error::nomem;
+			return {};
 		}
 
-		u2f_filename fname;
-
-		u2f_make_filename(handle, fname);
+		auto fname = u2f_make_filename(handle);
 
 		if (sfs_stat((char *)fname.begin(), &entry) == 0) {
 			/* Handle already exists, try again. */
@@ -188,35 +189,38 @@ static error u2f_write_private(mbedtls_mpi &priv, gtl::span<char> handle)
 		u2f_key key;
 		if (mbedtls_mpi_write_binary(&priv, key.begin(),
 					     key.size()) != 0) {
-			SYS_LOG_ERR("write_binary len=%d",
-				    mbedtls_mpi_size(&priv));
-			return error::nomem;
+			return {};
 		}
 
 		err = u2f_write_file(fname.cbegin(), key);
 		if (err) {
 			SYS_LOG_ERR("write_file err=%d", err.code);
-			return err;
+			return {};
 		}
 
-		return error::ok;
+		return handle;
 	}
 }
 
-static error u2f_authenticate(int p1, const struct slice &pc, int le,
+static error u2f_authenticate(int p1, const gtl::span<u8_t> &pc, int le,
 			      struct net_buf *resp)
 {
-	auto chal = pc.get_p(0, 32);
-	auto app = pc.get_p(32, 32);
-	int l = pc.get_u8(64);
-	auto handle = pc.get_p(65, l).cast<char>();
+	auto chal = pc.subspan(0, 32);
+	auto app = pc.subspan(32, 32);
+	auto ls = pc.subspan(64, 1);
+
+	if (chal.empty() || app.empty() || ls.empty()) {
+		return error::inval;
+	}
+
+	auto l = ls.at(0);
+	auto handle = pc.subspan(65, l).cast<char>();
+	if (handle.empty()) {
+		return error::inval;
+	}
 
 	SYS_LOG_DBG("chal=%p app=%p l=%d handle=%p", chal.cbegin(),
 		    app.cbegin(), l, handle.cbegin());
-
-	if (!chal || !app || l != (int)handle.size() || !handle) {
-		return error::inval;
-	}
 
 	if (p1 != U2F_AUTHENTICATE_SIGN) {
 		return error::inval;
@@ -227,10 +231,6 @@ static error u2f_authenticate(int p1, const struct slice &pc, int le,
 		return error::perm;
 	}
 
-	u2f_filename fname;
-
-	u2f_make_filename(handle, fname);
-
 	/* Add user presence */
 	net_buf_add_u8(resp, 1);
 
@@ -238,19 +238,16 @@ static error u2f_authenticate(int p1, const struct slice &pc, int le,
 	net_buf_add_be32(resp, 1);
 
 	/* Generate the digest */
-	sha256 sha;
-	sha.update_it(app);
-	sha.update<u8_t>(1);
-	sha.update<u32_t>(1);
-	sha.update_it(chal);
-
-	sha256::digest digest;
-
-	sha.sum(digest);
+	auto digest = sha256().update(app)
+			      .update_be<u8_t>(1)
+			      .update_be<u32_t>(1)
+			      .update(chal)
+			      .final();
 
 	/* Generate the signature */
 	mpi r, s, d;
 
+	auto fname = u2f_make_filename(handle);
 	/* Fetch the private key */
 	if (u2f_read_key(fname.begin(), d)) {
 		SYS_LOG_ERR("read d");
@@ -269,22 +266,22 @@ static error u2f_authenticate(int p1, const struct slice &pc, int le,
 		return error::nomem;
 	}
 
-	net_buf_add_x962(resp, r.w, s.w);
+	net_buf_add_x962(resp, r, s);
 
 	return error::ok;
 }
 
-static error u2f_register(int p1, const struct slice &pc, int le,
+static error u2f_register(int p1, const struct gtl::span<u8_t> &pc, int le,
 			  struct net_buf *resp)
 {
-	auto chal = pc.get_p(0, 32);
-	auto app = pc.get_p(32, 32);
+	auto chal = pc.subspan(0, 32);
+	auto app = pc.subspan(32, 32);
 	error err;
 	int now = 0;
 	size_t len;
 
 	u2f_took("start", &now);
-	if (!chal || !app) {
+	if (chal.empty() || app.empty()) {
 		return error::inval;
 	}
 
@@ -298,10 +295,7 @@ static error u2f_register(int p1, const struct slice &pc, int le,
 	net_buf_add_u8(resp, U2F_REGISTER_ID);
 
 	/* Reserve space for the public key */
-	slice pub = {
-		.p = (u8_t *)net_buf_add(resp, 65),
-		.len = 65,
-	};
+	gtl::span<u8_t> pub{(u8_t *)net_buf_add(resp, 65), 65};
 
 	u2f_took("pre-generate key", &now);
 
@@ -328,24 +322,20 @@ static error u2f_register(int p1, const struct slice &pc, int le,
 
 	u2f_took("generate key", &now);
 
-	u2f_handle handle;
-
-	err = u2f_write_private(ctx.w.d, handle);
-	if (err) {
+	auto handle = u2f_write_private(ctx.w.d);
+	if (!handle) {
 		SYS_LOG_ERR("write_private");
 		return err;
 	}
 	u2f_took("write key", &now);
 
-	net_buf_add_u8(resp, handle.size());
-	net_buf_add_mem(resp, handle.cbegin(), handle.size());
+	net_buf_add_u8(resp, handle->size());
+	net_buf_add_mem(resp, handle->cbegin(), handle->size());
 
 	/* Add the attestation certificate */
-	slice tail = {
-		.p = net_buf_tail(resp),
-		.len = net_buf_tailroom(resp),
-	};
-	auto read = u2f_read_file((const u8_t *)U2F_CERTIFICATE_NAME, tail);
+	gtl::span<u8_t> tail{net_buf_tail(resp), net_buf_tailroom(resp)};
+
+	auto read = u2f_read_file(U2F_CERTIFICATE_NAME, tail);
 	if (read < 0) {
 		return ERROR(read);
 	}
@@ -357,23 +347,20 @@ static error u2f_register(int p1, const struct slice &pc, int le,
 	u2f_took("read attest", &now);
 
 	/* Generate the digest */
-	sha256 sha;
-	sha.update<u8_t>(U2F_REGISTER_HASH_ID);
-	sha.update_it(app);
-	sha.update_it(chal);
-	sha.update_it(handle);
-	sha.update<u8_t>(U2F_EC_FMT_UNCOMPRESSED);
-	sha.update_it(pub, 1);
+	auto digest = sha256().update_be<u8_t>(U2F_REGISTER_HASH_ID)
+			      .update(app)
+			      .update(chal)
+			      .update(*handle)
+			      .update_be<u8_t>(U2F_EC_FMT_UNCOMPRESSED)
+			      .update(pub, 1)
+			      .final();
 
-	sha256::digest digest;
-
-	sha.sum(digest);
 	u2f_took("sha", &now);
 
 	/* Generate the signature */
 	mpi r, s, a;
 
-	if (u2f_read_key((const u8_t *)U2F_PRIVATE_KEY_NAME, a)) {
+	if (u2f_read_key(U2F_PRIVATE_KEY_NAME, a)) {
 		return error::inval;
 	}
 
@@ -385,12 +372,12 @@ static error u2f_register(int p1, const struct slice &pc, int le,
 	}
 	u2f_took("sign", &now);
 
-	net_buf_add_x962(resp, r.w, s.w); // signature);
+	net_buf_add_x962(resp, r, s);
 
 	return error::ok;
 }
 
-static error u2f_version(int p1, const slice &pc, int le,
+static error u2f_version(int p1, const gtl::span<u8_t> &pc, int le,
 			 struct net_buf *resp)
 {
 	net_buf_add_mem(resp, "U2F_V2", 6);
@@ -398,7 +385,7 @@ static error u2f_version(int p1, const slice &pc, int le,
 	return error::ok;
 }
 
-static error u2f_write_once(string fname, const struct slice &pc)
+static error u2f_write_once(string fname, const gtl::span<u8_t> &pc)
 {
 	struct sfs_dirent entry;
 
@@ -410,18 +397,18 @@ static error u2f_write_once(string fname, const struct slice &pc)
 	return u2f_write_file(fname, pc);
 }
 
-static error u2f_set_private_key(const struct slice &pc)
+static error u2f_set_private_key(const gtl::span<u8_t> &pc)
 {
 	if (pc.size() != 32) {
 		return error::inval;
 	}
 
-	return u2f_write_once((const u8_t *)U2F_PRIVATE_KEY_NAME, pc);
+	return u2f_write_once(U2F_PRIVATE_KEY_NAME, pc);
 }
 
-static error u2f_set_certificate(const struct slice &pc)
+static error u2f_set_certificate(const gtl::span<u8_t> &pc)
 {
-	return u2f_write_once((const u8_t *)U2F_CERTIFICATE_NAME, pc);
+	return u2f_write_once(U2F_CERTIFICATE_NAME, pc);
 }
 
 static error u2f_erase(void)
@@ -454,7 +441,7 @@ static error u2f_erase(void)
 	}
 }
 
-static error u2f_vendor(u8_t p1, u8_t p2, struct slice &pc)
+static error u2f_vendor(u8_t p1, u8_t p2, const gtl::span<u8_t> &pc)
 {
 	switch (p1) {
 	case U2F_SET_PRIVATE_KEY:
@@ -491,7 +478,7 @@ error u2f_dispatch(struct net_buf *req, struct net_buf *resp)
 	}
 
 	auto len = net_buf_pull_be16(req);
-	slice pc{req->data, len};
+	gtl::span<u8_t> pc{req->data, len};
 
 	req->data += len;
 	req->len -= len;

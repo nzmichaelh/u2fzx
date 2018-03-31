@@ -28,33 +28,40 @@ struct sha256 {
 	}
 	~sha256() { mbedtls_sha256_free(&sha_); }
 
-	template <typename T> void update_it(const T &sp, size_t drop = 0);
-	template <typename T> void update(T ch);
+	template <typename T> sha256& update(const T &sp, size_t skip = 0);
+	template <typename T> sha256& update_be(const T ch);
 
-	void sum(digest &di) { mbedtls_sha256_finish_ret(&sha_, di.begin()); }
+	digest final() {
+		digest di;
+		mbedtls_sha256_finish_ret(&sha_, di.begin());
+		return di;
+	}
 
       private:
 	mbedtls_sha256_context sha_;
 };
 
-template <typename T> void sha256::update_it(const T &sp, size_t drop)
+template <typename T> sha256& sha256::update(const T &sp, size_t skip)
 {
-	if (!sp.empty() && drop < sp.size()) {
-		mbedtls_sha256_update_ret(&sha_, (u8_t *)sp.cbegin() + drop,
-					  sp.size() - drop);
+	if (!sp.empty() && skip < sp.size()) {
+		mbedtls_sha256_update_ret(&sha_, (u8_t *)sp.cbegin() + skip,
+					  sp.size() - skip);
 	}
+	return *this;
 }
 
-template <typename T> void sha256::update(T ch)
+template <typename T> sha256& sha256::update_be(const T ch)
 {
 	u8_t buf[sizeof(ch)];
+	u32_t v = ch;
 
 	for (int i = sizeof(ch) - 1; i >= 0; i--) {
-		buf[i] = static_cast<u8_t>(ch);
-		ch >>= 8;
+		buf[i] = static_cast<u8_t>(v);
+		v >>= 8;
 	}
 
 	mbedtls_sha256_update(&sha_, buf, sizeof(buf));
+	return *this;
 }
 
 struct mpi {

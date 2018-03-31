@@ -12,16 +12,6 @@
 
 #include "sfs.h"
 
-int slice::get_u8(ptrdiff_t offset) const
-{
-	auto s = get_p(offset, 1);
-
-	if (!s) {
-		return -EINVAL;
-	}
-	return s.cbegin()[0];
-}
-
 void u2f_took(const char *msg, int *start)
 {
 	u32_t now = k_uptime_get_32();
@@ -40,7 +30,7 @@ void u2f_dump_hex(const char *msg, const u8_t *buf, int len)
 	printk("\n");
 }
 
-void u2f_dump_hex(const char *msg, const slice &s)
+void u2f_dump_hex(const char *msg, const gtl::span<u8_t> &s)
 {
 	u2f_dump_hex(msg, s.cbegin(), s.size());
 }
