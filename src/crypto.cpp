@@ -31,7 +31,7 @@ struct crypto {
 
 static crypto crypto;
 
-error u2f_base64url(const gsl::span<u8_t> src, gsl::span<char> dest)
+size_t u2f_base64url(const gsl::span<u8_t> src, gsl::span<char> dest)
 {
 	static const char alphabet[] = "ABCDEFGHIJKLMNOP"
 				       "QRSTUVWXYZabcdef"
@@ -40,7 +40,7 @@ error u2f_base64url(const gsl::span<u8_t> src, gsl::span<char> dest)
 	size_t out = src.size() * 4 / 3;
 
 	if ((src.size() % 3) != 0 || dest.size() != out) {
-		return error::inval;
+		return 0;
 	}
 
 	char *p = dest.begin();
@@ -54,7 +54,7 @@ error u2f_base64url(const gsl::span<u8_t> src, gsl::span<char> dest)
 		}
 	}
 
-	return error::ok;
+	return p - dest.begin();
 }
 
 int u2f_mbedtls_rng(void *ctx, u8_t *buf, size_t len)

@@ -64,8 +64,8 @@
 #define U2F_SEED_NAME "/seed"
 
 using u2f_key = std::array<u8_t, 32>;
-using u2f_filename = std::array<u8_t, MAX_FILE_NAME + 1>;
-using u2f_handle = std::array<char, 8>;
+using u2f_filename = std::array<char, MAX_FILE_NAME + 1>;
+using u2f_handle = std::array<u8_t, 6>;
 
 static u16_t u2f_map_err(error err)
 {
@@ -85,14 +85,14 @@ static u16_t u2f_map_err(error err)
 	}
 }
 
-static u2f_filename u2f_make_filename(const gsl::span<char> handle)
+static u2f_filename u2f_make_filename(const gsl::span<u8_t> handle)
 {
 	u2f_filename fname;
 
 	auto *p = fname.begin();
 	*p++ = '/';
-	std::copy(handle.cbegin(), handle.cend(), p);
-	p += handle.size();
+	/* Make the handle printable */
+	p += u2f_base64url(handle, {p, (size_t)(fname.end() - p)});
 	*p++ = '.';
 	*p++ = 'k';
 	*p++ = '\0';
@@ -162,28 +162,19 @@ static std::optional<u2f_handle> u2f_write_private(const mbedtls_mpi &priv)
 {
 	for (;;) {
 		struct sfs_dirent entry;
-		std::array<u8_t, 6> raw;
-		error err;
 
 		/* Create a handle */
-		err = u2f_rng(raw);
+		u2f_handle handle;
+
+		auto err = u2f_rng(handle);
 		if (err) {
 			SYS_LOG_ERR("make handle");
 			return {};
 		}
 
-		u2f_handle handle;
+		u2f_filename fname = u2f_make_filename(handle);
 
-		/* Make the handle printable */
-		err = u2f_base64url(raw, handle);
-		if (err) {
-			SYS_LOG_ERR("base64_encode err=%d", err.code);
-			return {};
-		}
-
-		auto fname = u2f_make_filename(handle);
-
-		if (sfs_stat((char *)fname.begin(), &entry) == 0) {
+		if (sfs_stat(fname.begin(), &entry) == 0) {
 			/* Handle already exists, try again. */
 			continue;
 		}
@@ -216,7 +207,7 @@ static error u2f_authenticate(int p1, const gsl::span<u8_t> &pc, int le,
 	}
 
 	auto l = ls.at(0);
-	auto handle = pc.subspan(65, l).cast<char>();
+	auto handle = pc.subspan(65, l);
 	if (handle.empty()) {
 		return error::inval;
 	}
