@@ -12,8 +12,8 @@
 #include <zephyr.h>
 
 extern "C" {
-#include <mbedtls/entropy.h>
 #include <mbedtls/ctr_drbg.h>
+#include <mbedtls/entropy.h>
 }
 
 #include "prng.h"
@@ -35,9 +35,7 @@ static int prng_init(struct device *dev)
 	mbedtls_entropy_init(&data.entropy);
 
 	err = mbedtls_ctr_drbg_seed(
-		&data.ctr_drbg,
-		mbedtls_entropy_func,
-		&data.entropy,
+		&data.ctr_drbg, mbedtls_entropy_func, &data.entropy,
 		(const unsigned char *)data.personalization,
 		sizeof(data.personalization));
 

@@ -1,12 +1,12 @@
-#include <kernel.h>
+#include <board.h>
 #include <device.h>
 #include <gpio.h>
-#include <board.h>
 #include <init.h>
+#include <kernel.h>
 
 #include "ui.h"
 
-#define WINK_PERIOD  300
+#define WINK_PERIOD 300
 #define CANCEL_PRESENT 2000
 
 struct ui {
@@ -25,7 +25,7 @@ static void ui_work(struct k_work *work)
 	if (data.winking) {
 		data.led_on = !data.led_on;
 		gpio_pin_write(data.led, LED0_GPIO_PIN, data.led_on);
-		k_delayed_work_submit(&data.wink, WINK_PERIOD/2);
+		k_delayed_work_submit(&data.wink, WINK_PERIOD / 2);
 	}
 }
 

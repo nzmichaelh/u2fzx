@@ -80,12 +80,14 @@ void u2f_fprintf(void *, const char *, ...);
 #define MBEDTLS_AES_ROM_TABLES
 
 /* Save RAM by adjusting to our exact needs */
-#define MBEDTLS_ECP_MAX_BITS             256
-#define MBEDTLS_MPI_MAX_SIZE              32 // 256 bits is 32 bytes
+#define MBEDTLS_ECP_MAX_BITS 256
+#define MBEDTLS_MPI_MAX_SIZE 32 // 256 bits is 32 bytes
 
 unsigned int mbedtls_timing_hardclock(void);
-int mbedtls_platform_std_nv_seed_read(unsigned char *buf, unsigned int buf_len);
-int mbedtls_platform_std_nv_seed_write(unsigned char *buf, unsigned int buf_len);
+int mbedtls_platform_std_nv_seed_read(unsigned char *buf,
+				      unsigned int buf_len);
+int mbedtls_platform_std_nv_seed_write(unsigned char *buf,
+				       unsigned int buf_len);
 
 #include "mbedtls/check_config.h"
 

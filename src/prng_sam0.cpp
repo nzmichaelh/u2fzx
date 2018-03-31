@@ -7,8 +7,8 @@
 #include <string.h>
 #include <zephyr.h>
 
-#include <arch/arm/cortex_m/cmsis.h>
 #include "prng.h"
+#include <arch/arm/cortex_m/cmsis.h>
 
 extern "C" {
 #include <mbedtls/entropy.h>
@@ -40,7 +40,4 @@ void prng_board_init()
 }
 #endif
 
-u32_t mbedtls_timing_hardclock()
-{
-	return SysTick->VAL;
-}
+u32_t mbedtls_timing_hardclock() { return SysTick->VAL; }

@@ -7,8 +7,8 @@
 #ifndef _FS_SFS_H_
 #define _FS_SFS_H_
 
-#include <sys/types.h>
 #include <fs.h>
+#include <zephyr/types.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -22,7 +22,7 @@ struct sfs_file {
 	sfs_block block;
 	s16_t offset;
 	s16_t size;
-	u8_t name[MAX_FILE_NAME+1];
+	u8_t name[MAX_FILE_NAME + 1];
 };
 
 struct sfs_dir {

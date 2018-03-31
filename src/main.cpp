@@ -8,8 +8,8 @@
 #define SYS_LOG_DOMAIN "main"
 #include <logging/sys_log.h>
 
-#include <zephyr.h>
 #include "crypto.h"
+#include <zephyr.h>
 
 void hid_run();
 

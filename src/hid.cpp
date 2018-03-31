@@ -18,10 +18,11 @@
 #include <usb/class/usb_hid.h>
 #include <usb/usb_device.h>
 
-#include "error.h"
 #include "prng.h"
-#include "stdish.h"
 #include "ui.h"
+#include "util.h"
+
+#include <algorithm>
 
 #define TYPE_MASK 0x80
 #define TYPE_INIT 0x80
@@ -72,7 +73,6 @@ enum class u2fhid_err : u8_t {
 extern struct net_buf_pool hid_msg_pool;
 extern struct net_buf_pool hid_rx_pool;
 
-void dump_hex(const char *msg, const u8_t *buf, int len);
 error u2f_dispatch(struct net_buf *req, struct net_buf *resp);
 
 struct u2f_init_hdr {
@@ -133,6 +133,20 @@ static const u8_t hid_report_desc[] = {
 	0xc0, /* END_COLLECTION */
 };
 
+struct autounref {
+	autounref(struct net_buf *b) : buf_{b} {}
+	~autounref()
+	{
+		if (buf_ != nullptr) {
+			net_buf_unref(buf_);
+			buf_ = nullptr;
+		}
+	}
+
+      private:
+	struct net_buf *buf_;
+};
+
 static error hid_handle_init(struct net_buf *req, struct net_buf *resp)
 {
 	net_buf_add_mem(resp, req->data, 8);
@@ -155,7 +169,7 @@ static net_buf *hid_rx_pkt(u8_t type, int min_size, int timeout)
 	if (rx == nullptr) {
 		return nullptr;
 	}
-	dump_hex("<<", rx->data, rx->len);
+	u2f_dump_hex("<<", rx->data, rx->len);
 
 	if (rx->len < min_size) {
 		return nullptr;
@@ -201,7 +215,8 @@ static net_buf *hid_rx(u32_t &cid, u2fhid_cmd &cmd)
 
 	size_t remain = bcnt;
 	/* Take everything from the first packet */
-	size_t take = min(remain, rx->len - offsetof(u2f_init_pkt, payload));
+	size_t take =
+		std::min(remain, rx->len - offsetof(u2f_init_pkt, payload));
 	net_buf_add_mem(req, hdr->payload, take);
 	remain -= take;
 
@@ -225,8 +240,8 @@ static net_buf *hid_rx(u32_t &cid, u2fhid_cmd &cmd)
 			return nullptr;
 		}
 
-		take = min(remain,
-			   crx->len - offsetof(u2f_cont_pkt, payload));
+		take = std::min(remain,
+				crx->len - offsetof(u2f_cont_pkt, payload));
 		net_buf_add_mem(req, cont->payload, take);
 		SYS_LOG_DBG("took %d of remain=%d from seq=%d", take, remain,
 			    seq);
@@ -254,7 +269,7 @@ static error hid_tx_pkt(const u8_t *buf, int len)
 {
 	prng_feed();
 
-//	dump_hex(">>", buf, len);
+	//	u2f_dump_hex(">>", buf, len);
 
 	for (int retry = 0; retry < 10; retry++) {
 		u32_t wrote = 0;
@@ -292,7 +307,7 @@ static void hid_tx(u32_t cid, u2fhid_cmd cmd, net_buf *resp)
 
 		sys_put_be16(bcnt, init.bcnt);
 
-		size_t take = min(sizeof(init.payload), bcnt);
+		size_t take = std::min(sizeof(init.payload), bcnt);
 		std::copy(p, p + take, init.payload);
 
 		SYS_LOG_DBG("writing %d of %d in 1st packet", take, bcnt);
@@ -310,7 +325,7 @@ static void hid_tx(u32_t cid, u2fhid_cmd cmd, net_buf *resp)
 			.seq = seq,
 		};
 
-		int take = min(sizeof(cont.payload), bcnt);
+		int take = std::min(sizeof(cont.payload), bcnt);
 		std::copy(p, p + take, cont.payload);
 
 		if (hid_tx_pkt((u8_t *)&cont, sizeof(cont))) {
@@ -404,10 +419,7 @@ static int hid_get_report_cb(struct usb_setup_packet *setup, s32_t *len,
 	return 0;
 }
 
-static void hid_int_in_ready(void)
-{
-	k_sem_give(&data.tx_sem);
-}
+static void hid_int_in_ready(void) { k_sem_give(&data.tx_sem); }
 
 static struct hid_ops ops = {
 	.get_report = hid_get_report_cb,
@@ -415,6 +427,7 @@ static struct hid_ops ops = {
 	.get_protocol = nullptr,
 	.set_report = hid_set_report_cb,
 	.set_idle = nullptr,
+	.set_protocol = nullptr,
 	.int_in_ready = hid_int_in_ready,
 };
 

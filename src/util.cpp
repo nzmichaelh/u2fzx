@@ -1,15 +1,16 @@
+#define SYS_LOG_LEVEL 4
+#define SYS_LOG_DOMAIN "u2f"
+#include <logging/sys_log.h>
+
+#include <misc/__assert.h>
+#include <misc/byteorder.h>
+#include <net/buf.h>
+#include <string.h>
+#include <zephyr.h>
+
 #include "util.h"
 
-slice slice::get_p(ptrdiff_t offset, size_t len) const
-{
-	if (offset < 0 || len < 0) {
-		return {nullptr};
-	}
-	if (offset + len > this->len) {
-		return {nullptr};
-	}
-	return {.p = p + offset, .len = len};
-}
+#include "sfs.h"
 
 int slice::get_u8(ptrdiff_t offset) const
 {
@@ -18,5 +19,28 @@ int slice::get_u8(ptrdiff_t offset) const
 	if (!s) {
 		return -EINVAL;
 	}
-	return s.p[0];
+	return s.cbegin()[0];
+}
+
+void u2f_took(const char *msg, int *start)
+{
+	u32_t now = k_uptime_get_32();
+	s32_t took = now - *start;
+	*start = now;
+
+	printk("%d (+%d) %s\n", now, took, msg);
+}
+
+void u2f_dump_hex(const char *msg, const u8_t *buf, int len)
+{
+	printk("%u %s(%d): ", k_uptime_get_32(), msg, len);
+	for (int i = 0; i < len; i++) {
+		printk(" %x", buf[i]);
+	}
+	printk("\n");
+}
+
+void u2f_dump_hex(const char *msg, const slice &s)
+{
+	u2f_dump_hex(msg, s.cbegin(), s.size());
 }

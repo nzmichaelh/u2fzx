@@ -2,10 +2,18 @@
 #define SYS_LOG_DOMAIN "crypto"
 #include <logging/sys_log.h>
 
-#include "crypto.h"
 #include "sfs.h"
+#include "util.h"
 
 #define U2F_SEED "/seed"
+
+extern "C" {
+#include <mbedtls/ctr_drbg.h>
+#include <mbedtls/ecdsa.h>
+#include <mbedtls/ecp.h>
+#include <mbedtls/entropy.h>
+#include <mbedtls/sha256.h>
+}
 
 struct crypto {
 	mbedtls_entropy_context entropy;
@@ -14,29 +22,44 @@ struct crypto {
 
 static crypto crypto;
 
-void sha256::update(const slice &sl, size_t drop)
+error u2f_base64url(const gtl::span<u8_t> src, gtl::span<char> dest)
 {
-	if (sl && drop < sl.len) {
-		mbedtls_sha256_update_ret(&sha_, sl.p + drop, sl.len - drop);
+	static const char alphabet[] = "ABCDEFGHIJKLMNOP"
+				       "QRSTUVWXYZabcdef"
+				       "ghijklmnopqrstuv"
+				       "wxyz0123456789-_";
+	size_t out = src.size() * 4 / 3;
+
+	if ((src.size() % 3) != 0 || dest.size() != out) {
+		return error::inval;
 	}
+
+	char *p = dest.begin();
+	for (size_t i = 0; i < src.size(); i += 3) {
+		const auto s = src.cbegin();
+		u32_t acc = (s[i + 2] << 16) | (s[i + 1] << 8) | (s[i + 0]);
+
+		for (size_t j = 0; j < 4; j++) {
+			*p++ = alphabet[acc % 64];
+			acc >>= 6;
+		}
+	}
+
+	return error::ok;
 }
 
-void sha256::sum(slice &sl) {
-	mbedtls_sha256_finish_ret(&sha_, sl.p);
-}
-
-int u2f_mbedtls_rng(void *ctx, u8_t* buf, size_t len)
+int u2f_mbedtls_rng(void *ctx, u8_t *buf, size_t len)
 {
 	SYS_LOG_DBG("len=%d", len);
 
 	return mbedtls_ctr_drbg_random(&crypto.ctr_drbg, buf, len);
 }
 
-error u2f_rng(slice& dest)
+error u2f_rng(gtl::span<u8_t> dest)
 {
 	SYS_LOG_DBG("");
 
-	return error(u2f_mbedtls_rng(nullptr, dest.p, dest.len));
+	return error(u2f_mbedtls_rng(nullptr, dest.begin(), dest.size()));
 }
 
 int mbedtls_platform_std_nv_seed_read(u8_t *buf, size_t len)
@@ -94,10 +117,9 @@ error u2f_crypto_init()
 	mbedtls_entropy_init(&crypto.entropy);
 	mbedtls_ctr_drbg_init(&crypto.ctr_drbg);
 
-	return error(mbedtls_ctr_drbg_seed(
-			     &crypto.ctr_drbg,
-			     mbedtls_entropy_func, &crypto.entropy,
-			     NULL, 0));
+	return error(mbedtls_ctr_drbg_seed(&crypto.ctr_drbg,
+					   mbedtls_entropy_func,
+					   &crypto.entropy, NULL, 0));
 }
 
 void *stderr;
