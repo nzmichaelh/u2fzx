@@ -2,7 +2,7 @@
 
 #include <utility>
 
-namespace gtl
+namespace gsl
 {
 
 template <typename T> struct span {
@@ -53,4 +53,4 @@ template <typename F> final_action<F> finally(F &&act)
 	return {std::forward<F>(act)};
 }
 
-} // namespace gtl
+} // namespace gsl

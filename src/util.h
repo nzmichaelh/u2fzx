@@ -6,7 +6,7 @@
 #include <zephyr/types.h>
 
 #include "sfs.h"
-#include "ugtl.h"
+#include "ugsl.h"
 
 #define ERROR(_code)                                                         \
 	{                                                                    \
@@ -49,7 +49,7 @@ struct string {
 
 void u2f_took(const char *msg, int *start);
 void u2f_dump_hex(const char *msg, const u8_t *buf, int len);
-void u2f_dump_hex(const char *msg, const gtl::span<u8_t> &s);
+void u2f_dump_hex(const char *msg, const gsl::span<u8_t> &s);
 
 template <typename T> error u2f_write_file(string fname, const T &pc)
 {

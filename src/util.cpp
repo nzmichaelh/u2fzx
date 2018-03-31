@@ -30,7 +30,7 @@ void u2f_dump_hex(const char *msg, const u8_t *buf, int len)
 	printk("\n");
 }
 
-void u2f_dump_hex(const char *msg, const gtl::span<u8_t> &s)
+void u2f_dump_hex(const char *msg, const gsl::span<u8_t> &s)
 {
 	u2f_dump_hex(msg, s.cbegin(), s.size());
 }

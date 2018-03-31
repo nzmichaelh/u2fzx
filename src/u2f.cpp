@@ -21,7 +21,7 @@
 
 #include "crypto.h"
 #include "tlspp.h"
-#include "ugtl.h"
+#include "ugsl.h"
 #include "ui.h"
 #include "util.h"
 
@@ -83,7 +83,7 @@ static u16_t u2f_map_err(error err)
 	}
 }
 
-static u2f_filename u2f_make_filename(const gtl::span<char> handle)
+static u2f_filename u2f_make_filename(const gsl::span<char> handle)
 {
 	u2f_filename fname;
 
@@ -202,7 +202,7 @@ static std::optional<u2f_handle> u2f_write_private(const mbedtls_mpi &priv)
 	}
 }
 
-static error u2f_authenticate(int p1, const gtl::span<u8_t> &pc, int le,
+static error u2f_authenticate(int p1, const gsl::span<u8_t> &pc, int le,
 			      struct net_buf *resp)
 {
 	auto chal = pc.subspan(0, 32);
@@ -271,7 +271,7 @@ static error u2f_authenticate(int p1, const gtl::span<u8_t> &pc, int le,
 	return error::ok;
 }
 
-static error u2f_register(int p1, const struct gtl::span<u8_t> &pc, int le,
+static error u2f_register(int p1, const struct gsl::span<u8_t> &pc, int le,
 			  struct net_buf *resp)
 {
 	auto chal = pc.subspan(0, 32);
@@ -295,7 +295,7 @@ static error u2f_register(int p1, const struct gtl::span<u8_t> &pc, int le,
 	net_buf_add_u8(resp, U2F_REGISTER_ID);
 
 	/* Reserve space for the public key */
-	gtl::span<u8_t> pub{(u8_t *)net_buf_add(resp, 65), 65};
+	gsl::span<u8_t> pub{(u8_t *)net_buf_add(resp, 65), 65};
 
 	u2f_took("pre-generate key", &now);
 
@@ -333,7 +333,7 @@ static error u2f_register(int p1, const struct gtl::span<u8_t> &pc, int le,
 	net_buf_add_mem(resp, handle->cbegin(), handle->size());
 
 	/* Add the attestation certificate */
-	gtl::span<u8_t> tail{net_buf_tail(resp), net_buf_tailroom(resp)};
+	gsl::span<u8_t> tail{net_buf_tail(resp), net_buf_tailroom(resp)};
 
 	auto read = u2f_read_file(U2F_CERTIFICATE_NAME, tail);
 	if (read < 0) {
@@ -377,7 +377,7 @@ static error u2f_register(int p1, const struct gtl::span<u8_t> &pc, int le,
 	return error::ok;
 }
 
-static error u2f_version(int p1, const gtl::span<u8_t> &pc, int le,
+static error u2f_version(int p1, const gsl::span<u8_t> &pc, int le,
 			 struct net_buf *resp)
 {
 	net_buf_add_mem(resp, "U2F_V2", 6);
@@ -385,7 +385,7 @@ static error u2f_version(int p1, const gtl::span<u8_t> &pc, int le,
 	return error::ok;
 }
 
-static error u2f_write_once(string fname, const gtl::span<u8_t> &pc)
+static error u2f_write_once(string fname, const gsl::span<u8_t> &pc)
 {
 	struct sfs_dirent entry;
 
@@ -397,7 +397,7 @@ static error u2f_write_once(string fname, const gtl::span<u8_t> &pc)
 	return u2f_write_file(fname, pc);
 }
 
-static error u2f_set_private_key(const gtl::span<u8_t> &pc)
+static error u2f_set_private_key(const gsl::span<u8_t> &pc)
 {
 	if (pc.size() != 32) {
 		return error::inval;
@@ -406,7 +406,7 @@ static error u2f_set_private_key(const gtl::span<u8_t> &pc)
 	return u2f_write_once(U2F_PRIVATE_KEY_NAME, pc);
 }
 
-static error u2f_set_certificate(const gtl::span<u8_t> &pc)
+static error u2f_set_certificate(const gsl::span<u8_t> &pc)
 {
 	return u2f_write_once(U2F_CERTIFICATE_NAME, pc);
 }
@@ -420,7 +420,7 @@ static error u2f_erase(void)
 	if (status != 0) {
 		return ERROR(status);
 	}
-	auto _ = gtl::finally([&dir] { sfs_closedir(&dir); });
+	auto _ = gsl::finally([&dir] { sfs_closedir(&dir); });
 
 	for (;;) {
 		struct sfs_dirent ent;
@@ -441,7 +441,7 @@ static error u2f_erase(void)
 	}
 }
 
-static error u2f_vendor(u8_t p1, u8_t p2, const gtl::span<u8_t> &pc)
+static error u2f_vendor(u8_t p1, u8_t p2, const gsl::span<u8_t> &pc)
 {
 	switch (p1) {
 	case U2F_SET_PRIVATE_KEY:
@@ -478,7 +478,7 @@ error u2f_dispatch(struct net_buf *req, struct net_buf *resp)
 	}
 
 	auto len = net_buf_pull_be16(req);
-	gtl::span<u8_t> pc{req->data, len};
+	gsl::span<u8_t> pc{req->data, len};
 
 	req->data += len;
 	req->len -= len;

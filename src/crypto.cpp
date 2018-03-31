@@ -23,7 +23,7 @@ struct crypto {
 
 static crypto crypto;
 
-error u2f_base64url(const gtl::span<u8_t> src, gtl::span<char> dest)
+error u2f_base64url(const gsl::span<u8_t> src, gsl::span<char> dest)
 {
 	static const char alphabet[] = "ABCDEFGHIJKLMNOP"
 				       "QRSTUVWXYZabcdef"
@@ -56,7 +56,7 @@ int u2f_mbedtls_rng(void *ctx, u8_t *buf, size_t len)
 	return mbedtls_ctr_drbg_random(&crypto.ctr_drbg, buf, len);
 }
 
-error u2f_rng(gtl::span<u8_t> dest)
+error u2f_rng(gsl::span<u8_t> dest)
 {
 	SYS_LOG_DBG("");
 
