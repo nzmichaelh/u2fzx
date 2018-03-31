@@ -15,6 +15,12 @@ void hid_run();
 
 void main(void)
 {
+	/* The crypto init overwrites the seed.  Wait a little for the
+	 * power to stabalise to reduce the change of losing the
+	 * seed.
+	 */
+	k_sleep(K_MSEC(670));
+
 	auto err = u2f_crypto_init();
 	if (err) {
 		SYS_LOG_ERR("crypto=%d", err.code);

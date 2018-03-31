@@ -18,7 +18,6 @@
 #include <usb/class/usb_hid.h>
 #include <usb/usb_device.h>
 
-#include "prng.h"
 #include "ui.h"
 #include "util.h"
 
@@ -267,8 +266,6 @@ static u2fhid_err hid_map_error(error err)
 
 static error hid_tx_pkt(const u8_t *buf, int len)
 {
-	prng_feed();
-
 	for (int retry = 0; retry < 10; retry++) {
 		u32_t wrote = 0;
 		error err = ERROR(
@@ -339,52 +336,50 @@ static void hid_tx(u32_t cid, u2fhid_cmd cmd, net_buf *resp)
 
 void hid_run()
 {
-	for (;;) {
-		/* Receive a packet and ensure it's released later. */
-		u32_t cid = 0;
-		u2fhid_cmd cmd = u2fhid_cmd::ERROR;
+	/* Receive a packet and ensure it's released later. */
+	u32_t cid = 0;
+	u2fhid_cmd cmd = u2fhid_cmd::ERROR;
 
-		auto req = hid_rx(cid, cmd);
-		autounref req1{req};
+	auto req = hid_rx(cid, cmd);
+	autounref req1{req};
 
-		if (req == nullptr) {
-			continue;
-		}
+	if (req == nullptr) {
+		return;
+	}
 
-		/* Allocate the response buf. */
-		auto resp = net_buf_alloc(&hid_msg_pool, K_NO_WAIT);
-		autounref resp1{resp};
+	/* Allocate the response buf. */
+	auto resp = net_buf_alloc(&hid_msg_pool, K_NO_WAIT);
+	autounref resp1{resp};
 
-		if (resp == nullptr) {
-			continue;
-		}
+	if (resp == nullptr) {
+		return;
+	}
 
-		error err;
+	error err;
 
-		switch (cmd) {
-		case u2fhid_cmd::INIT:
-			err = hid_handle_init(req, resp);
-			break;
-		case u2fhid_cmd::MSG:
-			err = u2f_dispatch(req, resp);
-			break;
-		case u2fhid_cmd::WINK:
-			ui_wink();
-			err = error::ok;
-			break;
-		default:
-			err = ERROR(-ENOENT);
-			break;
-		}
+	switch (cmd) {
+	case u2fhid_cmd::INIT:
+		err = hid_handle_init(req, resp);
+		break;
+	case u2fhid_cmd::MSG:
+		err = u2f_dispatch(req, resp);
+		break;
+	case u2fhid_cmd::WINK:
+		ui_wink();
+		err = error::ok;
+		break;
+	default:
+		err = ERROR(-ENOENT);
+		break;
+	}
 
-		if (err) {
-			net_buf_reset(resp);
-			net_buf_add_u8(resp,
-				       static_cast<u8_t>(hid_map_error(err)));
-			hid_tx(cid, u2fhid_cmd::ERROR, resp);
-		} else {
-			hid_tx(cid, cmd, resp);
-		}
+	if (err) {
+		net_buf_reset(resp);
+		net_buf_add_u8(resp,
+			       static_cast<u8_t>(hid_map_error(err)));
+		hid_tx(cid, u2fhid_cmd::ERROR, resp);
+	} else {
+		hid_tx(cid, cmd, resp);
 	}
 }
 
@@ -392,8 +387,6 @@ static int hid_set_report_cb(struct usb_setup_packet *setup, s32_t *plen,
 			     u8_t **pdata)
 {
 	size_t len = *plen;
-
-	prng_feed();
 
 	auto buf = net_buf_alloc(&hid_rx_pool, K_NO_WAIT);
 	if (buf == nullptr) {

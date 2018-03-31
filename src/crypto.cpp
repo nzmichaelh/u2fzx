@@ -12,6 +12,8 @@
 #include "sfs.h"
 #include "util.h"
 
+#include <algorithm>
+
 #define U2F_SEED "/seed"
 
 extern "C" {
@@ -57,39 +59,36 @@ error u2f_base64url(const gsl::span<u8_t> src, gsl::span<char> dest)
 
 int u2f_mbedtls_rng(void *ctx, u8_t *buf, size_t len)
 {
-	SYS_LOG_DBG("len=%d", len);
-
 	return mbedtls_ctr_drbg_random(&crypto.ctr_drbg, buf, len);
 }
 
 error u2f_rng(gsl::span<u8_t> dest)
 {
-	SYS_LOG_DBG("");
-
 	return error(u2f_mbedtls_rng(nullptr, dest.begin(), dest.size()));
 }
 
 int mbedtls_platform_std_nv_seed_read(u8_t *buf, size_t len)
 {
 	struct sfs_file fp;
-	int err;
 
 	SYS_LOG_DBG("len=%d", len);
 
-	err = sfs_open(&fp, U2F_SEED);
+	std::fill(buf, buf + len, 0x55);
+
+	auto err = sfs_open(&fp, U2F_SEED);
 	if (err != 0) {
 		SYS_LOG_DBG("open");
-		return err;
+		return 0;
 	}
 
 	auto got = sfs_read(&fp, buf, len);
 	if (got < 0) {
 		SYS_LOG_DBG("read");
-		return got;
+		return 0;
 	}
 	if ((size_t)got != len) {
 		SYS_LOG_DBG("short");
-		return -EIO;
+		return 0;
 	}
 	return 0;
 }
@@ -124,9 +123,11 @@ error u2f_crypto_init()
 	mbedtls_entropy_init(&crypto.entropy);
 	mbedtls_ctr_drbg_init(&crypto.ctr_drbg);
 
+	auto custom = u2f_crypto_custom();
 	return error(mbedtls_ctr_drbg_seed(&crypto.ctr_drbg,
 					   mbedtls_entropy_func,
-					   &crypto.entropy, NULL, 0));
+					   &crypto.entropy,
+					   (u8_t*)custom.data(), custom.size()*sizeof(custom.data()[0])));
 }
 
 void *stderr;

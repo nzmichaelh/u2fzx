@@ -12,6 +12,7 @@ namespace gsl
 {
 
 template <typename T> struct span {
+	template <std::size_t N> span(T (&arr)[N]) : p_(&arr[0]), size_(N) {}
 	template <typename U> span(U &t) : p_(t.begin()), size_(t.size()) {}
 
 	span(T *p, size_t size) : p_(p), size_(size) {}
@@ -35,10 +36,10 @@ template <typename T> struct span {
 		return {(U *)p_, size_ * sizeof(T) / sizeof(U)};
 	}
 	const span<T> subspan(size_t off, size_t size) const {
-		if (off + size > size) {
+		if (off + size > size_) {
 			return {};
 		}
-		return {p_ + off, size_ - size};
+		return {p_ + off, size};
 	}
 
       protected:

@@ -47,6 +47,7 @@
 #define U2F_ERASE 0xc1
 #define U2F_SET_CERTIFICATE 0xc2
 #define U2F_SET_PRIVATE_KEY 0xc3
+#define U2F_SET_SEED 0xc4
 
 /* Command status responses */
 #define U2F_SW_NO_ERROR 0x9000
@@ -60,6 +61,7 @@
 
 #define U2F_PRIVATE_KEY_NAME "/attest.pk"
 #define U2F_CERTIFICATE_NAME "/attest.der"
+#define U2F_SEED_NAME "/seed"
 
 using u2f_key = std::array<u8_t, 32>;
 using u2f_filename = std::array<u8_t, MAX_FILE_NAME + 1>;
@@ -90,7 +92,7 @@ static u2f_filename u2f_make_filename(const gsl::span<char> handle)
 	auto *p = fname.begin();
 	*p++ = '/';
 	std::copy(handle.cbegin(), handle.cend(), p);
-	p += handle.size() - 1;
+	p += handle.size();
 	*p++ = '.';
 	*p++ = 'k';
 	*p++ = '\0';
@@ -219,8 +221,9 @@ static error u2f_authenticate(int p1, const gsl::span<u8_t> &pc, int le,
 		return error::inval;
 	}
 
-	SYS_LOG_DBG("chal=%p app=%p l=%d handle=%p", chal.cbegin(),
-		    app.cbegin(), l, handle.cbegin());
+	SYS_LOG_DBG("chal=%p app=%p l=%d handle=%p:%d", chal.cbegin(),
+		    app.cbegin(), l, handle.cbegin(), handle.size());
+
 
 	if (p1 != U2F_AUTHENTICATE_SIGN) {
 		return error::inval;
@@ -250,7 +253,7 @@ static error u2f_authenticate(int p1, const gsl::span<u8_t> &pc, int le,
 	auto fname = u2f_make_filename(handle);
 	/* Fetch the private key */
 	if (u2f_read_key(fname.begin(), d)) {
-		SYS_LOG_ERR("read d");
+		SYS_LOG_ERR("read d fname=%s", fname.data());
 		return error::inval;
 	}
 
@@ -402,13 +405,20 @@ static error u2f_set_private_key(const gsl::span<u8_t> &pc)
 	if (pc.size() != 32) {
 		return error::inval;
 	}
-
 	return u2f_write_once(U2F_PRIVATE_KEY_NAME, pc);
 }
 
 static error u2f_set_certificate(const gsl::span<u8_t> &pc)
 {
 	return u2f_write_once(U2F_CERTIFICATE_NAME, pc);
+}
+
+static error u2f_set_seed(const gsl::span<u8_t> &pc)
+{
+	if (pc.size() < 32) {
+		return error::inval;
+	}
+	return u2f_write_once(U2F_SEED_NAME, pc);
 }
 
 static error u2f_erase(void)
@@ -448,6 +458,8 @@ static error u2f_vendor(u8_t p1, u8_t p2, const gsl::span<u8_t> &pc)
 		return u2f_set_private_key(pc);
 	case U2F_SET_CERTIFICATE:
 		return u2f_set_certificate(pc);
+	case U2F_SET_SEED:
+		return u2f_set_seed(pc);
 	case U2F_ERASE:
 		return u2f_erase();
 	default:
