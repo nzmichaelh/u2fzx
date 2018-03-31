@@ -269,8 +269,6 @@ static error hid_tx_pkt(const u8_t *buf, int len)
 {
 	prng_feed();
 
-	//	u2f_dump_hex(">>", buf, len);
-
 	for (int retry = 0; retry < 10; retry++) {
 		u32_t wrote = 0;
 		error err = ERROR(
@@ -342,18 +340,18 @@ static void hid_tx(u32_t cid, u2fhid_cmd cmd, net_buf *resp)
 void hid_run()
 {
 	for (;;) {
-		// Receive a packet and ensure it's released later.
+		/* Receive a packet and ensure it's released later. */
 		u32_t cid = 0;
 		u2fhid_cmd cmd = u2fhid_cmd::ERROR;
 
 		auto req = hid_rx(cid, cmd);
-		autounref unref1{req};
+		autounref req1{req};
 
 		if (req == nullptr) {
 			continue;
 		}
 
-		// Allocate the response buf.
+		/* Allocate the response buf. */
 		auto resp = net_buf_alloc(&hid_msg_pool, K_NO_WAIT);
 		autounref resp1{resp};
 

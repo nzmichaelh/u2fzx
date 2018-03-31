@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2018 Google LLC.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #define SYS_LOG_LEVEL 4
 #define SYS_LOG_DOMAIN "crypto"
 #include <logging/sys_log.h>

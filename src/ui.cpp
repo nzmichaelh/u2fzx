@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2018 Google LLC.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #include <board.h>
 #include <device.h>
 #include <gpio.h>

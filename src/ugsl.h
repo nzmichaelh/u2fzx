@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2018 Google LLC.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #pragma once
 
 #include <utility>
@@ -53,4 +59,4 @@ template <typename F> final_action<F> finally(F &&act)
 	return {std::forward<F>(act)};
 }
 
-} // namespace gsl
+}

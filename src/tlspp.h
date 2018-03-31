@@ -1,4 +1,10 @@
 /*
+ * Copyright (c) 2018 Google LLC.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/*
  * Tiny wrappers around mbedtls to make it type safe and ensure that
  * memory is released.
  */
