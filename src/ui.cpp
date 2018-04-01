@@ -41,10 +41,10 @@ struct ui_seq {
 	}
 	void tick()
 	{
-		if (v_ == 0) {
+		v_ >>= 1;
+		if (v_ <= 1) {
 			v_ = reload_;
 		}
-		v_ >>= 1;
 	}
 
 	bool on() const { return (v_ & 1) != 0; }
@@ -67,16 +67,25 @@ static const u16_t patterns[][3] = {
 	/* AUTO */
 	{0, 1},
 	/* STARTUP */
-	{0b101000, 0b100100, 0b100010},
+	{0b1100, 0b1010, 0b1001},
 	/* RUN */
 	{0},
-	/* REGISTER */
-	{0b1110},
-	/* AUTHENTICATE */
-	{0b1010},
+	/* ERROR */
+	{0, 0b100000000001},
+	/* ERROR_INVAL */
+	{0, 0b100000000101},
+	/* ERROR_NOENT */
+	{0, 0b100001010101},
+	/* ERROR_NOMEM */
+	{0, 0b100101010101},
 	/* FAULT */
-	{0, 1},
+	{0, 0b11},
+	/* REGISTER */
+	{0b11110},
+	/* AUTHENTICATE */
+	{0b110},
 };
+BUILD_ASSERT(ARRAY_SIZE(patterns) == (int)ui_code::AUTHENTICATE + 1);
 
 static struct ui data;
 

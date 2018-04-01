@@ -85,6 +85,24 @@ static u16_t u2f_map_err(error err)
 	}
 }
 
+static ui_code u2f_map_err_wink(error err)
+{
+	switch (err.code) {
+	case 0:
+		/* Fallthrough */
+	case -EPERM:
+		return ui_code::INVALID;
+	case -EINVAL:
+		return ui_code::ERROR_INVAL;
+	case -ENOENT:
+		return ui_code::ERROR_NOENT;
+	case -ENOMEM:
+		return ui_code::ERROR_NOMEM;
+	default:
+		return ui_code::ERROR;
+	}
+}
+
 static u2f_filename u2f_make_filename(const gsl::span<u8_t> handle)
 {
 	u2f_filename fname;
@@ -521,6 +539,7 @@ error u2f_dispatch(struct net_buf *req, struct net_buf *resp)
 
 	if (err) {
 		SYS_LOG_ERR("err=%d", err.code);
+		ui_wink(u2f_map_err_wink(err));
 	}
 
 	net_buf_add_be16(resp, u2f_map_err(err));

@@ -11,9 +11,13 @@ enum class ui_code {
 	AUTO,
 	STARTUP,
 	RUN,
+	ERROR,
+	ERROR_INVAL,
+	ERROR_NOENT,
+	ERROR_NOMEM,
+	FAULT,
 	REGISTER,
 	AUTHENTICATE,
-	FAULT,
 };
 
 void ui_wink(ui_code code);
