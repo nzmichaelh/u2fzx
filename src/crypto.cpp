@@ -39,7 +39,7 @@ size_t u2f_base64url(const gsl::span<u8_t> src, gsl::span<char> dest)
 				       "wxyz0123456789-_";
 	size_t out = src.size() * 4 / 3;
 
-	if ((src.size() % 3) != 0 || dest.size() != out) {
+	if ((src.size() % 3) != 0 || dest.size() < out) {
 		return 0;
 	}
 

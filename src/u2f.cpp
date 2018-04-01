@@ -97,6 +97,8 @@ static u2f_filename u2f_make_filename(const gsl::span<u8_t> handle)
 	*p++ = 'k';
 	*p++ = '\0';
 
+	SYS_LOG_DBG("'%s'", fname.data());
+
 	return fname;
 }
 
@@ -160,7 +162,7 @@ static error u2f_read_key(const string fname, mpi &key)
 
 static std::optional<u2f_handle> u2f_write_private(const mbedtls_mpi &priv)
 {
-	for (;;) {
+	for (auto tries = 0; tries < 10; tries++) {
 		struct sfs_dirent entry;
 
 		/* Create a handle */
@@ -193,6 +195,7 @@ static std::optional<u2f_handle> u2f_write_private(const mbedtls_mpi &priv)
 
 		return handle;
 	}
+	return {};
 }
 
 static error u2f_authenticate(int p1, const gsl::span<u8_t> &pc, int le,
@@ -220,7 +223,7 @@ static error u2f_authenticate(int p1, const gsl::span<u8_t> &pc, int le,
 		return error::inval;
 	}
 
-	if (!ui_user_present()) {
+	if (!ui_user_present(ui_code::AUTHENTICATE)) {
 		SYS_LOG_INF("user not present");
 		return error::perm;
 	}
@@ -279,11 +282,9 @@ static error u2f_register(int p1, const struct gsl::span<u8_t> &pc, int le,
 		return error::inval;
 	}
 
-#if 0
-	if (!ui_user_present()) {
+	if (!ui_user_present(ui_code::REGISTER)) {
 		return error::perm;
 	}
-#endif
 
 	/* Add the header */
 	net_buf_add_u8(resp, U2F_REGISTER_ID);

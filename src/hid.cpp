@@ -365,7 +365,7 @@ void hid_run()
 		err = u2f_dispatch(req, resp);
 		break;
 	case u2fhid_cmd::WINK:
-		ui_wink();
+		ui_wink(ui_code::AUTO);
 		err = error::ok;
 		break;
 	default:

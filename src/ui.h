@@ -6,5 +6,15 @@
 
 #pragma once
 
-void ui_wink();
-bool ui_user_present();
+enum class ui_code {
+	INVALID,
+	AUTO,
+	STARTUP,
+	RUN,
+	REGISTER,
+	AUTHENTICATE,
+	FAULT,
+};
+
+void ui_wink(ui_code code);
+bool ui_user_present(ui_code code);

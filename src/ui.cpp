@@ -4,11 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#define SYS_LOG_LEVEL 4
+#define SYS_LOG_DOMAIN "ui"
+#include <logging/sys_log.h>
+
+#include <array>
+
 #include <board.h>
 #include <device.h>
 #include <gpio.h>
 #include <init.h>
 #include <kernel.h>
+#include <led_strip.h>
 
 #include "ui.h"
 
@@ -16,53 +23,177 @@
 #define CANCEL_PRESENT 2000
 
 struct ui {
-	bool winking;
-	struct device *led;
-	struct k_delayed_work wink;
+	k_sem sem;
 
-	bool led_on;
-	bool user_present;
+	ui_code last_check;
+
+	volatile u16_t winking;
+	volatile ui_code user_present;
+};
+
+struct ui_seq {
+	void set(u16_t reload)
+	{
+		if (reload != reload_) {
+			reload_ = reload;
+			v_ = 0;
+		}
+	}
+	void tick()
+	{
+		if (v_ == 0) {
+			v_ = reload_;
+		}
+		v_ >>= 1;
+	}
+
+	bool on() const { return (v_ & 1) != 0; }
+	bool idle() const { return reload_ == 0; }
+
+      private:
+	u16_t v_ = 0;
+	u16_t reload_ = 0;
+};
+
+struct ui_led {
+	struct device *dev;
+	int pin;
+	bool invert;
+};
+
+static const u16_t patterns[][3] = {
+	/* INVALID */
+	{0, 1},
+	/* AUTO */
+	{0, 1},
+	/* STARTUP */
+	{0b101000, 0b100100, 0b100010},
+	/* RUN */
+	{0},
+	/* REGISTER */
+	{0b1110},
+	/* AUTHENTICATE */
+	{0b1010},
+	/* FAULT */
+	{0, 1},
 };
 
 static struct ui data;
 
-static void ui_work(struct k_work *work)
+extern "C" void ui_thread(void *p1, void *p2, void *p3)
 {
-	if (data.winking) {
-		data.led_on = !data.led_on;
-		gpio_pin_write(data.led, LED0_GPIO_PIN, data.led_on);
-		k_delayed_work_submit(&data.wink, WINK_PERIOD / 2);
+	ui_code code = ui_code::INVALID;
+	int blinks = 0;
+
+	ui_seq seq[3];
+	std::array<ui_led, 3> leds{};
+
+#ifdef LED0_GPIO_PORT
+	leds[0] = {
+		.dev = device_get_binding(LED0_GPIO_PORT),
+		.pin = LED0_GPIO_PIN,
+	};
+#endif
+#ifdef LED1_GPIO_PORT
+	leds[1] = {
+		.dev = device_get_binding(LED1_GPIO_PORT),
+		.pin = LED1_GPIO_PIN,
+		.invert = true,
+	};
+#endif
+#ifdef LED2_GPIO_PORT
+	leds[2] = {
+		.dev = device_get_binding(LED2_GPIO_PORT),
+		.pin = LED2_GPIO_PIN,
+		.invert = true,
+	};
+#endif
+
+	for (auto &led : leds) {
+		if (led.dev == nullptr) {
+			continue;
+		}
+		gpio_pin_configure(led.dev, led.pin, GPIO_DIR_OUT);
+	}
+
+	struct device *strip = nullptr;
+#ifdef CONFIG_APA102_STRIP_NAME
+	strip = device_get_binding(CONFIG_APA102_STRIP_NAME);
+#endif
+
+	for (;;) {
+		auto winking = data.winking;
+		auto next = (ui_code)(find_msb_set(winking) - 1);
+
+		if (next != code) {
+			code = next;
+			auto &pattern = patterns[(int)code];
+			for (auto i = 0U; i < ARRAY_SIZE(pattern); i++) {
+				seq[i].set(pattern[i]);
+			}
+			blinks = 0;
+		}
+
+		for (auto i = 0U; i < leds.size(); i++) {
+			auto &led = leds[i];
+			if (led.dev == nullptr) {
+				continue;
+			}
+			gpio_pin_write(led.dev, led.pin,
+				       seq[i].on() ^ led.invert);
+		}
+		if (strip != nullptr) {
+			struct led_rgb rgb = {
+				.scratch = 0,
+				.r = (u8_t)(seq[1].on() ? 255 : 0),
+				.g = (u8_t)(seq[0].on() ? 255 : 0),
+				.b = (u8_t)(seq[2].on() ? 255 : 0),
+			};
+			led_strip_update_rgb(strip, &rgb, 1);
+		}
+
+		if (++blinks == 3000 / 200) {
+			data.user_present = code;
+		}
+		for (auto &s : seq) {
+			s.tick();
+		}
+
+		if (code == ui_code::RUN) {
+			k_sem_take(&data.sem, K_FOREVER);
+		} else {
+			k_sleep(K_MSEC(200));
+		}
 	}
 }
 
-void ui_wink()
+void ui_wink(ui_code code)
 {
-	bool was = data.winking;
-	data.winking = true;
-
-	if (!was) {
-		k_delayed_work_submit(&data.wink, 0);
+	if (code == ui_code::AUTO) {
+		code = data.last_check;
 	}
 
-	data.user_present = true;
+	data.winking |= 1 << (int)code;
+	k_sem_give(&data.sem);
 }
 
-bool ui_user_present()
+bool ui_user_present(ui_code code)
 {
-	bool ret = data.user_present;
-	data.user_present = false;
-	data.winking = false;
+	auto ret = data.user_present;
+	data.last_check = code;
 
-	return true || ret;
+	if (ret != code) {
+		return false;
+	}
+	data.user_present = ui_code::INVALID;
+	data.winking &= ~(1 << (int)code);
+
+	return true;
 }
 
 static int ui_init(struct device *dev)
 {
-	data.led = device_get_binding(LED0_GPIO_PORT);
-	gpio_pin_configure(data.led, LED0_GPIO_PIN, GPIO_DIR_OUT);
-
-	k_delayed_work_init(&data.wink, ui_work);
-
+	k_sem_init(&data.sem, 1, 1);
 	return 0;
 }
 
