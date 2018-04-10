@@ -153,7 +153,9 @@ extern "C" void ui_thread(void *p1, void *p2, void *p3)
 		}
 		if (strip != nullptr) {
 			struct led_rgb rgb = {
+#ifdef CONFIG_LED_STRIP_RGB_SCRATCH
 				.scratch = 0,
+#endif
 				.r = (u8_t)(seq[1].on() ? 255 : 0),
 				.g = (u8_t)(seq[0].on() ? 255 : 0),
 				.b = (u8_t)(seq[2].on() ? 255 : 0),

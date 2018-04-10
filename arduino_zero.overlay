@@ -1,4 +1,4 @@
-&sercom5 {
+&sercom0 {
 	current-speed = <1000000>;
 };
 
