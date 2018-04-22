@@ -7,6 +7,10 @@ the FIDO U2F protocol and has been tested with Chrome, Google
 accounts, and Github and should be compatible with any other site or
 browser that supports U2F over USB.
 
+TODO: u2fzx is under development.  The Trinket version is the
+further est along but still needs button support.  The Blackpill port
+is started but doesn't support USB yet.
+
 u2fzx uses the Zephyr RTOS and mbed TLS, has been tested on the
 Adafruit Trinket M0 and generic Blackpill STM32 boards, and should be
 straight forward to port to other Zephyr supported boards.
