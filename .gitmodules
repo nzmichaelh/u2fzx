@@ -1,3 +1,9 @@
 [submodule "third_party/zephyr"]
 	path = third_party/zephyr
-	url = https://github.com/zephyrproject-rtos/zephyr.git
+	url = https://github.com/nzmichaelh/u2fzx.git
+[submodule "nzzephyr"]
+	path = third_party/zephyr
+	url = https://github.com/nzmichaelh/u2fzx.git
+[submodule "nzzephyr2"]
+	path = third_party/zephyr
+	url = https://github.com/nzmichaelh/zephyr.git
