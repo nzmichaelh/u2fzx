@@ -1,0 +1,38 @@
+// / {
+// 		zephyr,code-partition = &code_partition;
+// };
+
+&sram0 {
+	reg = <0x20000000 __SIZE_K(20)>;
+};
+
+&flash0 {
+	reg = <0x08000000 __SIZE_K(128)>;
+
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		// boot_partition: partition@0 {
+		// 	label = "boot";
+		// 	reg = <0x00000000 0x2000>;
+		// 	read-only;
+		// };
+
+		// code_partition: partition@2000 {
+		// 	label = "code";
+		// 	reg = <0x2000 0x1a000>;
+		// 	read-only;
+		// };
+
+		sfs_partition: partition@1c000 {
+			label = "sfs";
+			reg = <0x0001c000 0x00004000>;
+		};
+	};
+};
+
+&usb0 {
+	status = "ok";
+};
