@@ -7,5 +7,14 @@ zephyr_include_directories(
   src
 )
 
-FILE(GLOB app_sources src/*.c src/*.cpp)
-target_sources(app PRIVATE ${app_sources})
+target_sources(app PRIVATE
+  src/buf.c
+  src/crypto.cpp
+  src/hid.cpp
+  src/main.cpp
+  src/sfs.c
+  src/u2f.cpp
+  src/ui.cpp
+  src/util.cpp
+  src/crypto_sam0.cpp
+)

@@ -68,6 +68,10 @@ struct sfs_header {
 	u8_t crc;
 	u8_t data[0];
 };
+BUILD_ASSERT(SFS_HEADER_LEN % 2 == 0);
+
+#define SFS_WRITE_SIZE 64
+BUILD_ASSERT(SFS_HEADER_LEN <= SFS_WRITE_SIZE);
 
 struct sfs_data {
 	struct device *dev;
@@ -196,7 +200,7 @@ ssize_t sfs_write(struct sfs_file *zfp, const void *ptr, size_t size)
 	sfs_block block;
 	sfs_block end;
 	int err;
-	u8_t buf[data.write_size];
+	u8_t buf[SFS_WRITE_SIZE];
 	struct sfs_header *hdr = (struct sfs_header *)buf;
 	off_t at;
 	bool found = false;
@@ -501,6 +505,9 @@ static int sfs_init(struct device *dev)
 	 * much will be left for data.
 	 */
 	write_size = flash_get_write_block_size(data.dev);
+	if (write_size < SFS_WRITE_SIZE) {
+		write_size = SFS_WRITE_SIZE;
+	}
 	blocks = (SFS_HEADER_LEN + write_size - 1) / write_size;
 
 	data.write_size = write_size;

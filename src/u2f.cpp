@@ -542,12 +542,14 @@ error u2f_dispatch(struct net_buf *req, struct net_buf *resp)
 		break;
 	}
 
+#ifdef MBEDTLS_MEMORY_DEBUG
 	mbedtls_memory_buffer_alloc_status();
 
 	size_t max_used, max_blocks;
 	mbedtls_memory_buffer_alloc_max_get(&max_used, &max_blocks);
 
 	SYS_LOG_DBG("used=%d blocks=%d", max_used, max_blocks);
+#endif
 
 	if (err) {
 		SYS_LOG_ERR("err=%d", err.code);
